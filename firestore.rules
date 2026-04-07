@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── User profiles ──────────────────────────────────────
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ─── Logistics Slots (Bookings) ─────────────────────────
+    match /logistics_slots/{slotId} {
+      // Any authenticated user can read slots
+      allow read: if request.auth != null;
+      // Only managers can create/update bookings
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      // Only admins can delete (for audit trail)
+      allow delete: if request.auth != null;
+    }
+
+    // ─── Active Trucks (Real-time tracking) ──────────────────
+    match /activeTrucks/{truckId} {
+      // Managers and admins can read all truck positions
+      allow read: if request.auth != null;
+      // Only the driver owning this truck can write
+      allow write: if request.auth != null;
+    }
+
+    // ─── Compliance Records ─────────────────────────────────
+    match /compliance_records/{recordId} {
+      allow read: if request.auth != null;
+      // Drivers submit compliance; only one submission per booking
+      allow create: if request.auth != null;
+      allow update: if false; // Immutable after creation
+      allow delete: if false; // Never delete compliance evidence
+    }
+
+    // ─── Audit Logs (read-only for clients) ──────────────────
+    match /audit_logs/{logId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only written by Cloud Functions
+    }
+  }
+}

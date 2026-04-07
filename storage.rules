@@ -1,0 +1,27 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ─── Compliance Photos ──────────────────────────────────
+    match /compliance/{allPaths=**} {
+      // Any authenticated user can read compliance photos
+      allow read: if request.auth != null;
+
+      // Only authenticated drivers can upload
+      // Max file size: 10MB, must be an image
+      allow create: if request.auth != null
+                    && request.resource.size < 10 * 1024 * 1024
+                    && request.resource.contentType.matches('image/.*');
+
+      // No updates or deletes — compliance evidence is immutable
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Block all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
