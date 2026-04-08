@@ -1,12 +1,14 @@
 /**
- * driver-view.js — Zero-Install Mobile Driver Interface
+ * driver-view.js — Zero-Install Mobile Driver Interface v2
  *
  * Features:
  *  - Large "Start Tracking" button with pulse animation
- *  - Real-time distance display
+ *  - Real-time distance display with ETA
  *  - 500m geofence trigger unlocking compliance module
  *  - Camera/photo upload for dust mitigation proof
  *  - Delivery cannot be marked successful without verified photo
+ *  - POST-DELIVERY: 3-second delay → auto-clears to "Trip Completed.
+ *    Ready for Next Assignment" state (prevents dead-screen)
  */
 
 import { startTracking, stopTracking, isTrackingActive } from '../modules/tracking.js';
@@ -16,6 +18,7 @@ import { DEMO_SITES } from '../config/maps-config.js';
 let initialized = false;
 let trackingActive = false;
 let complianceUnlocked = false;
+let tripCompleted = false;
 
 // DOM references
 let els = {};
@@ -30,6 +33,7 @@ const currentTrip = {
 export function initDriverView() {
     if (initialized) return;
     initialized = true;
+    tripCompleted = false;
 
     // Cache DOM
     els = {
@@ -67,10 +71,20 @@ export function destroyDriverView() {
     }
     initialized = false;
     complianceUnlocked = false;
+    tripCompleted = false;
 }
 
 // ─── Tracking Toggle ────────────────────────────────────────────────────
 function handleTrackToggle() {
+    // If trip was completed, reset everything for next assignment
+    if (tripCompleted) {
+        tripCompleted = false;
+        currentTrip.driverId = 'driver-' + Date.now();
+        currentTrip.bookingId = 'booking-' + Date.now();
+        resetDriverUI();
+        return;
+    }
+
     if (trackingActive) {
         // STOP
         stopTracking();
@@ -178,13 +192,94 @@ function completeDelivery(photoUrl) {
 
     setStatus('Delivery Successful', 'emerald');
 
-    // Stop tracking after success
+    // ── POST-DELIVERY TRANSITION ────────────────────────────────────
+    // After 3 seconds: stop tracking, clear screen, show "Ready for Next"
     setTimeout(() => {
         if (trackingActive) {
             stopTracking();
             trackingActive = false;
         }
+        showTripCompletedState();
     }, 3000);
+}
+
+// ─── Trip Completed State ───────────────────────────────────────────────
+/**
+ * Renders the "Trip Completed. Ready for Next Assignment" screen.
+ * Replaces the tracking/compliance UI to prevent a dead-screen.
+ */
+function showTripCompletedState() {
+    tripCompleted = true;
+    complianceUnlocked = false;
+
+    // Remove tracking-active styles
+    if (els.view) els.view.classList.remove('tracking-active');
+
+    // ── Update Status Card ──────────────────────────────────────────
+    setStatus('Trip Completed', 'emerald');
+    if (els.distText) els.distText.textContent = '0.00 km';
+    if (els.etaText) els.etaText.textContent = '0 min';
+    if (els.siteName) els.siteName.textContent = '✅ Assignment Finished';
+
+    // ── Transform the tracking button into "Next Assignment" ────────
+    if (els.btnIcon) {
+        els.btnIcon.innerHTML = `
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        `;
+    }
+    if (els.btnLabel) els.btnLabel.textContent = 'NEXT';
+
+    // Change button color to blue glow
+    const core = els.trackBtn?.querySelector('.track-btn-core');
+    if (core) {
+        core.style.background = 'linear-gradient(135deg, #2563eb, #7c3aed)';
+        core.style.borderColor = '#1e1b4b';
+        core.style.boxShadow = '0 0 50px -5px rgba(99, 102, 241, 0.4), inset 0 2px 10px rgba(0,0,0,0.4)';
+    }
+
+    // Update ring colors
+    const ring1 = els.trackBtn?.querySelector('.track-btn-ring-1');
+    const ring2 = els.trackBtn?.querySelector('.track-btn-ring-2');
+    if (ring1) ring1.style.background = 'rgba(99, 102, 241, 0.12)';
+    if (ring2) ring2.style.background = 'rgba(99, 102, 241, 0.2)';
+
+    // ── Transform compliance section → Trip Summary ─────────────────
+    const cs = els.complianceSection;
+    if (cs) {
+        cs.classList.remove('opacity-40', 'pointer-events-none', 'translate-y-4');
+        cs.classList.add('opacity-100');
+        cs.innerHTML = `
+            <div class="text-center py-4">
+                <!-- Success checkmark -->
+                <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/15 border-2 border-emerald-500/30 flex items-center justify-center">
+                    <svg class="w-8 h-8 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                    </svg>
+                </div>
+
+                <h3 class="text-lg font-bold text-white mb-1">Trip Completed</h3>
+                <p class="text-emerald-400 text-sm font-medium mb-4">Ready for Next Assignment</p>
+
+                <!-- Trip Summary -->
+                <div class="grid grid-cols-3 gap-3 mt-4 mb-2">
+                    <div class="bg-slate-800/50 rounded-xl p-3">
+                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Site</p>
+                        <p class="text-xs text-white font-semibold mt-1 truncate">${currentTrip.site.name.split('–')[0].trim()}</p>
+                    </div>
+                    <div class="bg-slate-800/50 rounded-xl p-3">
+                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Status</p>
+                        <p class="text-xs text-emerald-400 font-semibold mt-1">Verified ✓</p>
+                    </div>
+                    <div class="bg-slate-800/50 rounded-xl p-3">
+                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Time</p>
+                        <p class="text-xs text-white font-semibold mt-1">${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</p>
+                    </div>
+                </div>
+
+                <p class="text-slate-500 text-xs mt-4">Tap the <span class="text-violet-400 font-semibold">NEXT</span> button above to start a new assignment</p>
+            </div>
+        `;
+    }
 }
 
 // ─── UI State Helpers ───────────────────────────────────────────────────
@@ -203,23 +298,55 @@ function resetDriverUI() {
 
     if (els.distText) els.distText.textContent = '-- km';
     if (els.etaText) els.etaText.textContent = '-- min';
+    if (els.siteName) els.siteName.textContent = currentTrip.site.name;
 
-    // Re-lock compliance
+    // Reset button styling (clear any custom inline styles from trip-complete)
+    const core = els.trackBtn?.querySelector('.track-btn-core');
+    if (core) { core.style.background = ''; core.style.borderColor = ''; core.style.boxShadow = ''; }
+    const ring1 = els.trackBtn?.querySelector('.track-btn-ring-1');
+    const ring2 = els.trackBtn?.querySelector('.track-btn-ring-2');
+    if (ring1) ring1.style.background = '';
+    if (ring2) ring2.style.background = '';
+
+    // Re-lock and restore compliance section
     complianceUnlocked = false;
     const cs = els.complianceSection;
     if (cs) {
         cs.classList.add('opacity-40', 'pointer-events-none', 'translate-y-4');
         cs.classList.remove('opacity-100');
+        cs.innerHTML = `
+            <h4 class="font-semibold flex items-center gap-2 mb-3 text-sm">
+                <svg class="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Site Arrival Compliance
+            </h4>
+            <p id="compliance-instructions" class="text-xs text-slate-400 mb-4 leading-relaxed">
+                <span class="text-slate-500">🔒 Locked</span> — Approach within 500m of the site to unlock dust mitigation photo upload.
+            </p>
+
+            <input type="file" id="compliance-photo" accept="image/*" capture="environment" class="hidden">
+            <button id="upload-photo-btn" class="w-full flex justify-center items-center gap-3 bg-slate-700 text-slate-400 py-4 rounded-2xl font-semibold cursor-not-allowed text-sm" disabled>
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <span>Take Dust Mitigation Photo</span>
+            </button>
+
+            <div id="upload-progress" class="hidden w-full bg-slate-700 rounded-full h-1.5 mt-4 overflow-hidden">
+                <div id="upload-progress-bar" class="bg-gradient-to-r from-blue-500 to-emerald-500 h-full rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+            </div>
+            <p id="upload-status-text" class="hidden text-xs text-emerald-400 mt-3 text-center font-medium"></p>
+        `;
+
+        // Re-cache the DOM elements after innerHTML replacement
+        els.complianceInstructions = document.getElementById('compliance-instructions');
+        els.uploadBtn = document.getElementById('upload-photo-btn');
+        els.photoInput = document.getElementById('compliance-photo');
+        els.progressContainer = document.getElementById('upload-progress');
+        els.progressBar = document.getElementById('upload-progress-bar');
+        els.uploadStatus = document.getElementById('upload-status-text');
+
+        // Re-bind events on new elements
+        if (els.uploadBtn) els.uploadBtn.addEventListener('click', () => els.photoInput?.click());
+        if (els.photoInput) els.photoInput.addEventListener('change', handlePhotoUpload);
     }
-    if (els.uploadBtn) {
-        els.uploadBtn.disabled = true;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-slate-700 text-slate-400 py-4 rounded-2xl font-semibold cursor-not-allowed';
-        els.uploadBtn.innerHTML = `
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-            <span>Take Dust Mitigation Photo</span>`;
-    }
-    if (els.uploadStatus) els.uploadStatus.classList.add('hidden');
-    if (els.progressContainer) els.progressContainer.classList.add('hidden');
 }
 
 function setStatus(text, color) {

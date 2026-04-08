@@ -1,14 +1,17 @@
 /**
- * manager-view.js — Site Manager Dashboard Controller (Leaflet.js — FREE)
+ * manager-view.js — Site Manager Dashboard Controller v2
  *
  * Features:
- *  - Live map showing inbound truck positions (OpenStreetMap)
- *  - Slot booking with Conflict Detection
+ *  - Live Leaflet.js map with inbound truck positions
+ *  - Slot booking with ENHANCED Conflict Detection:
+ *    → On conflict: shows suggested next available 30-min slot
+ *    → "Accept Suggestion" auto-books the suggested time
  *  - Today's schedule with status indicators
  */
 
 import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon } from '../config/maps-config.js';
 import { bookDeliverySlot, getBookings, seedDemoBookings } from '../modules/scheduler.js';
+import { getApprovedDrivers } from '../modules/auth.js';
 import { to12Hour, todayISO } from '../utils/formatters.js';
 
 let managerMap = null;
@@ -17,6 +20,12 @@ let initialized = false;
 // Currently selected site
 let selectedSite = DEMO_SITES[0];
 
+// Pending booking context (used when accepting a conflict suggestion)
+let pendingBooking = null;
+
+// Cached approved drivers list
+let approvedDriversCache = [];
+
 export async function initManagerView() {
     if (initialized) return;
     initialized = true;
@@ -24,6 +33,7 @@ export async function initManagerView() {
     seedDemoBookings();
     renderSchedule();
     bindBookingEvents();
+    await loadApprovedDrivers();
     await initLiveMap();
 }
 
@@ -33,6 +43,7 @@ export function destroyManagerView() {
         managerMap = null;
     }
     initialized = false;
+    pendingBooking = null;
 }
 
 // ─── Live Map (Leaflet — FREE) ──────────────────────────────────────────
@@ -110,6 +121,60 @@ async function initLiveMap() {
     setTimeout(() => managerMap.invalidateSize(), 200);
 }
 
+// ─── Load Approved Drivers for Booking Dropdown ─────────────────────────
+async function loadApprovedDrivers() {
+    const driverSelect = document.getElementById('bm-driver');
+    const driverHint = document.getElementById('bm-driver-hint');
+    const truckInput = document.getElementById('bm-truck-id');
+    if (!driverSelect) return;
+
+    // Show loading state
+    driverSelect.innerHTML = '<option value="" disabled selected>Loading drivers...</option>';
+    if (truckInput) { truckInput.value = ''; truckInput.placeholder = 'Select a driver above'; }
+
+    try {
+        approvedDriversCache = await getApprovedDrivers();
+    } catch (e) {
+        approvedDriversCache = [];
+    }
+
+    if (approvedDriversCache.length === 0) {
+        driverSelect.innerHTML = `
+            <option value="" disabled selected>No approved drivers yet</option>
+        `;
+        if (driverHint) {
+            driverHint.classList.remove('hidden');
+            driverHint.textContent = 'Drivers must register and be approved by admin first';
+        }
+    } else {
+        driverSelect.innerHTML = `
+            <option value="" disabled selected>Select a driver</option>
+            ${approvedDriversCache.map(d => `
+                <option value="${d.name || d.email}"
+                        data-uid="${d.uid}"
+                        data-email="${d.email}"
+                        data-license="${d.truckLicense || ''}">
+                    ${d.name || 'Unnamed'} · ${d.truckLicense || 'No license'}
+                </option>
+            `).join('')}
+        `;
+        if (driverHint) {
+            driverHint.classList.remove('hidden');
+            driverHint.textContent = `${approvedDriversCache.length} approved driver${approvedDriversCache.length > 1 ? 's' : ''} available`;
+        }
+    }
+
+    // Auto-fill truck license when driver is selected
+    driverSelect.addEventListener('change', () => {
+        const selectedOpt = driverSelect.options[driverSelect.selectedIndex];
+        const license = selectedOpt?.dataset?.license || '';
+        if (truckInput) {
+            truckInput.value = license;
+            truckInput.placeholder = license ? '' : 'No license on file';
+        }
+    });
+}
+
 // ─── Schedule Rendering ─────────────────────────────────────────────────
 function renderSchedule() {
     const container = document.getElementById('manager-slots-list');
@@ -177,27 +242,33 @@ function bindBookingEvents() {
         ).join('');
     }
 
-    openBtn.addEventListener('click', () => {
+    openBtn.addEventListener('click', async () => {
         modal.classList.remove('hidden');
         modal.classList.add('flex');
+        clearConflictUI();
         if (statusEl) { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
+        // Refresh driver list each time modal opens
+        await loadApprovedDrivers();
     });
 
     cancelBtn.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.classList.remove('flex');
+        clearConflictUI();
     });
 
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
             modal.classList.add('hidden');
             modal.classList.remove('flex');
+            clearConflictUI();
         }
     });
 
     confirmBtn.addEventListener('click', async () => {
         const truckId = document.getElementById('bm-truck-id').value.trim();
-        const driver = document.getElementById('bm-driver').value.trim();
+        const driverSelect = document.getElementById('bm-driver');
+        const driver = driverSelect?.value || '';
         const date = dateInput.value;
         const time = document.getElementById('bm-time').value;
         const siteOpt = siteSelect.options[siteSelect.selectedIndex];
@@ -209,8 +280,14 @@ function bindBookingEvents() {
             return;
         }
 
+        if (!driver) {
+            showBookingStatus('Please assign an approved driver.', 'error');
+            return;
+        }
+
         confirmBtn.disabled = true;
         confirmBtn.innerHTML = '<span class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>';
+        clearConflictUI();
 
         const result = await bookDeliverySlot({ truckId, targetSite, road, date, time, driver });
 
@@ -223,11 +300,136 @@ function bindBookingEvents() {
             setTimeout(() => {
                 modal.classList.add('hidden');
                 modal.classList.remove('flex');
+                clearConflictUI();
             }, 1200);
+        } else if (result.status === 'conflict' && result.suggestedTimeRaw) {
+            // ── CONFLICT WITH SUGGESTION — render conflict prompt ────
+            pendingBooking = { truckId, targetSite, road, date, time: result.suggestedTimeRaw, driver };
+            renderConflictSuggestion(result);
+        } else if (result.status === 'full') {
+            // ── ALL SLOTS FULL — no suggestion possible ─────────────
+            showBookingStatus(`🚫 ${result.message}`, 'error');
         } else {
             showBookingStatus(result.message, 'error');
         }
     });
+}
+
+// ─── Conflict Suggestion UI ─────────────────────────────────────────────
+
+/**
+ * Renders the conflict detection prompt with Accept/Cancel buttons.
+ * @param {{ message: string, suggestedTime: string, conflictingTruck: string }} result
+ */
+function renderConflictSuggestion(result) {
+    const statusEl = document.getElementById('bm-status');
+    if (!statusEl) return;
+
+    statusEl.classList.remove('hidden');
+    statusEl.className = 'mt-4 rounded-xl overflow-hidden border border-amber-500/20 animate-[fadeInUp_0.3s_ease-out]';
+    statusEl.innerHTML = `
+        <!-- Conflict Header -->
+        <div class="bg-red-500/10 px-4 py-3 flex items-center gap-3 border-b border-red-500/10">
+            <span class="flex-shrink-0 w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center text-sm">🚫</span>
+            <div class="flex-1 min-w-0">
+                <p class="text-red-400 font-semibold text-sm">Conflict Detected</p>
+                <p class="text-slate-400 text-xs mt-0.5 truncate">${result.message}</p>
+            </div>
+        </div>
+
+        <!-- Suggestion Card -->
+        <div class="bg-amber-500/5 px-4 py-4">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="flex-shrink-0 w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center">
+                    <span class="text-emerald-400 text-lg">🕐</span>
+                </span>
+                <div>
+                    <p class="text-slate-300 text-sm font-medium">Next available slot:</p>
+                    <p class="text-emerald-400 text-xl font-bold tracking-tight">${result.suggestedTime}</p>
+                </div>
+            </div>
+
+            <p class="text-slate-500 text-xs mb-4 leading-relaxed">
+                The Conflict Detection Engine found a free window on the same road. Book this slot instead?
+            </p>
+
+            <!-- Action Buttons -->
+            <div class="flex gap-3">
+                <button id="bm-accept-suggestion"
+                    class="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-[0.97] shadow-lg hover:shadow-emerald-500/20">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    Accept ${result.suggestedTime}
+                </button>
+                <button id="bm-reject-suggestion"
+                    class="px-5 py-2.5 text-slate-400 hover:text-white text-sm rounded-xl hover:bg-white/5 transition-all border border-white/5">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    `;
+
+    // ── Bind suggestion buttons ─────────────────────────────────────
+    const acceptBtn = document.getElementById('bm-accept-suggestion');
+    const rejectBtn = document.getElementById('bm-reject-suggestion');
+
+    if (acceptBtn) {
+        acceptBtn.addEventListener('click', async () => {
+            if (!pendingBooking) return;
+
+            acceptBtn.disabled = true;
+            acceptBtn.innerHTML = '<span class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span> Booking...';
+
+            const result = await bookDeliverySlot(pendingBooking);
+
+            if (result.success) {
+                statusEl.className = 'mt-4 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20';
+                statusEl.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <span class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center text-sm">✅</span>
+                        <div>
+                            <p class="text-emerald-400 font-semibold text-sm">Slot Booked Successfully!</p>
+                            <p class="text-slate-400 text-xs mt-0.5">${result.message}</p>
+                        </div>
+                    </div>
+                `;
+                renderSchedule();
+                pendingBooking = null;
+
+                const modal = document.getElementById('booking-modal');
+                setTimeout(() => {
+                    if (modal) {
+                        modal.classList.add('hidden');
+                        modal.classList.remove('flex');
+                    }
+                    clearConflictUI();
+                }, 1500);
+            } else {
+                // Edge case: suggested slot also got taken (race condition)
+                showBookingStatus(`Suggested slot also taken: ${result.message}`, 'error');
+                pendingBooking = null;
+            }
+        });
+    }
+
+    if (rejectBtn) {
+        rejectBtn.addEventListener('click', () => {
+            clearConflictUI();
+            pendingBooking = null;
+        });
+    }
+}
+
+/**
+ * Clear the conflict suggestion UI and reset status area.
+ */
+function clearConflictUI() {
+    const statusEl = document.getElementById('bm-status');
+    if (statusEl) {
+        statusEl.classList.add('hidden');
+        statusEl.className = 'hidden mt-4 p-3 rounded-lg text-sm';
+        statusEl.innerHTML = '';
+    }
+    pendingBooking = null;
 }
 
 function showBookingStatus(message, type) {
