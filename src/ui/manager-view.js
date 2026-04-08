@@ -1,16 +1,18 @@
 /**
- * manager-view.js — Site Manager Dashboard Controller v2
+ * manager-view.js — Site Manager Dashboard Controller v3 (Fully Realtime)
  *
  * Features:
- *  - Live Leaflet.js map with inbound truck positions
+ *  - Live Leaflet.js map with REALTIME inbound truck positions from Firestore
+ *  - REALTIME schedule fed by Firestore onSnapshot (no manual refresh needed)
  *  - Slot booking with ENHANCED Conflict Detection:
  *    → On conflict: shows suggested next available 30-min slot
  *    → "Accept Suggestion" auto-books the suggested time
- *  - Today's schedule with status indicators
+ *  - Live truck count indicator
  */
 
 import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon } from '../config/maps-config.js';
-import { bookDeliverySlot, getBookings, seedDemoBookings } from '../modules/scheduler.js';
+import { bookDeliverySlot, subscribeToBookings } from '../modules/scheduler.js';
+import { listenToActiveTrucks } from '../modules/tracking.js';
 import { getApprovedDrivers } from '../modules/auth.js';
 import { to12Hour, todayISO } from '../utils/formatters.js';
 
@@ -26,24 +28,186 @@ let pendingBooking = null;
 // Cached approved drivers list
 let approvedDriversCache = [];
 
+// Realtime subscription unsubscribers
+let unsubscribeBookings = null;
+let unsubscribeTrucks = null;
+
+// Map marker dictionary for live trucks { truckId: L.marker }
+let truckMarkers = {};
+
 export async function initManagerView() {
     if (initialized) return;
     initialized = true;
 
-    seedDemoBookings();
-    renderSchedule();
+    // Set today's date label
+    const scheduleDateEl = document.getElementById('schedule-date');
+    if (scheduleDateEl) {
+        scheduleDateEl.textContent = new Date().toLocaleDateString('en-IN', {
+            weekday: 'short', day: '2-digit', month: 'short', year: 'numeric'
+        });
+    }
+
     bindBookingEvents();
     await loadApprovedDrivers();
     await initLiveMap();
+    startRealtimeSchedule();
+    startRealtimeTruckTracking();
 }
 
 export function destroyManagerView() {
+    // Unsubscribe from Firestore listeners
+    if (unsubscribeBookings) {
+        unsubscribeBookings();
+        unsubscribeBookings = null;
+    }
+    if (unsubscribeTrucks) {
+        unsubscribeTrucks();
+        unsubscribeTrucks = null;
+    }
+
+    // Clean up map
     if (managerMap) {
         managerMap.remove();
         managerMap = null;
     }
+
+    truckMarkers = {};
     initialized = false;
     pendingBooking = null;
+}
+
+// ─── Realtime Schedule (Firestore onSnapshot) ───────────────────────────
+
+function startRealtimeSchedule() {
+    const today = todayISO();
+
+    // Show loading state
+    const container = document.getElementById('manager-slots-list');
+    if (container) {
+        container.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-12 text-slate-500">
+                <span class="inline-block w-6 h-6 border-2 border-slate-600 border-t-blue-400 rounded-full animate-spin mb-3"></span>
+                <p class="text-sm">Connecting to live schedule...</p>
+            </div>`;
+    }
+
+    unsubscribeBookings = subscribeToBookings(today, (liveBookings) => {
+        renderSchedule(liveBookings);
+    });
+}
+
+function renderSchedule(bookings) {
+    const container = document.getElementById('manager-slots-list');
+    if (!container) return;
+
+    if (!bookings || bookings.length === 0) {
+        container.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-12 text-slate-500">
+                <span class="text-4xl mb-3">📋</span>
+                <p class="font-medium">No deliveries scheduled</p>
+                <p class="text-sm mt-1">Book a slot to get started</p>
+            </div>`;
+        return;
+    }
+
+    const statusConfig = {
+        'SCHEDULED': { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20', dot: 'bg-blue-400', label: 'Scheduled' },
+        'EN_ROUTE':  { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20', dot: 'bg-amber-400', label: 'En Route' },
+        'ARRIVED':   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', dot: 'bg-emerald-400', label: 'Arrived' },
+        'COMPLETED': { bg: 'bg-slate-500/10',  text: 'text-slate-400', border: 'border-slate-500/20', dot: 'bg-slate-400', label: 'Completed' },
+    };
+
+    container.innerHTML = bookings.map((b, i) => {
+        const sc = statusConfig[b.status] || statusConfig['SCHEDULED'];
+        return `
+        <div class="schedule-item group flex items-center gap-4 p-4 rounded-xl border ${sc.border} ${sc.bg} hover:border-white/10 transition-all duration-300 cursor-default" style="animation-delay: ${i * 60}ms">
+            <div class="flex-shrink-0 w-16 text-center">
+                <p class="text-lg font-bold text-white">${to12Hour(b.time).split(' ')[0]}</p>
+                <p class="text-xs ${sc.text}">${to12Hour(b.time).split(' ')[1]}</p>
+            </div>
+            <div class="w-px h-10 bg-white/10"></div>
+            <div class="flex-1 min-w-0">
+                <p class="font-semibold text-white text-sm truncate">${b.truckId}</p>
+                <p class="text-xs text-slate-400 mt-0.5">${b.driver || 'Unassigned'} · ${b.road}</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
+                <span class="text-xs font-medium ${sc.text}">${sc.label}</span>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ─── Realtime Truck Tracking on Map ─────────────────────────────────────
+
+function startRealtimeTruckTracking() {
+    if (!managerMap) return;
+
+    unsubscribeTrucks = listenToActiveTrucks((trucks) => {
+        updateTruckCountIndicator(trucks.length);
+        reconcileTruckMarkers(trucks);
+    });
+}
+
+/**
+ * Update the live truck count badge in the header.
+ */
+function updateTruckCountIndicator(count) {
+    const indicator = document.getElementById('manager-truck-count');
+    if (indicator) {
+        indicator.textContent = `${count} truck${count !== 1 ? 's' : ''} active`;
+    }
+}
+
+/**
+ * Reconcile the map markers with the latest truck positions from Firestore.
+ * - Adds markers for new trucks
+ * - Moves markers for existing trucks (smooth transition)
+ * - Removes markers for trucks that went offline
+ */
+function reconcileTruckMarkers(trucks) {
+    if (!managerMap) return;
+
+    const currentIds = new Set(trucks.map(t => t.id));
+
+    // Remove markers for trucks that are no longer active
+    for (const id of Object.keys(truckMarkers)) {
+        if (!currentIds.has(id)) {
+            managerMap.removeLayer(truckMarkers[id]);
+            delete truckMarkers[id];
+        }
+    }
+
+    // Add or update markers
+    trucks.forEach(truck => {
+        if (!truck.lat || !truck.lng) return;
+
+        if (truckMarkers[truck.id]) {
+            // Smoothly move existing marker
+            truckMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
+
+            // Update popup content
+            truckMarkers[truck.id].setPopupContent(`
+                <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
+                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong><br>
+                    <span style="color:#666;font-size:12px">Driver: ${truck.driver || 'Unknown'}</span><br>
+                    <span style="color:#059669;font-size:12px;font-weight:600">📍 Live tracking</span>
+                </div>
+            `);
+        } else {
+            // Create new marker
+            const icon = createTruckIcon();
+            const marker = L.marker([truck.lat, truck.lng], { icon }).addTo(managerMap);
+            marker.bindPopup(`
+                <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
+                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong><br>
+                    <span style="color:#666;font-size:12px">Driver: ${truck.driver || 'Unknown'}</span><br>
+                    <span style="color:#059669;font-size:12px;font-weight:600">📍 Live tracking</span>
+                </div>
+            `);
+            truckMarkers[truck.id] = marker;
+        }
+    });
 }
 
 // ─── Live Map (Leaflet — FREE) ──────────────────────────────────────────
@@ -85,25 +249,6 @@ async function initLiveMap() {
             <div style="font-family:Inter,sans-serif;padding:4px">
                 <strong style="font-size:13px">${site.name}</strong><br>
                 <span style="color:#666;font-size:12px">Road: ${site.road}</span>
-            </div>
-        `);
-    });
-
-    // Mock inbound trucks
-    const mockTrucks = [
-        { lat: selectedSite.lat + 0.012, lng: selectedSite.lng - 0.008, id: 'MH-04-AB-1234', driver: 'Rajesh K.', eta: '12 min' },
-        { lat: selectedSite.lat - 0.008, lng: selectedSite.lng + 0.015, id: 'MH-04-CD-5678', driver: 'Sunil P.',  eta: '25 min' },
-        { lat: selectedSite.lat + 0.020, lng: selectedSite.lng + 0.005, id: 'MH-04-EF-9012', driver: 'Anil M.',   eta: '38 min' },
-    ];
-
-    mockTrucks.forEach(truck => {
-        const icon = createTruckIcon();
-        const marker = L.marker([truck.lat, truck.lng], { icon }).addTo(managerMap);
-        marker.bindPopup(`
-            <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
-                <strong style="font-size:13px">${truck.id}</strong><br>
-                <span style="color:#666;font-size:12px">Driver: ${truck.driver}</span><br>
-                <span style="color:#059669;font-size:12px;font-weight:600">ETA: ${truck.eta}</span>
             </div>
         `);
     });
@@ -173,51 +318,6 @@ async function loadApprovedDrivers() {
             truckInput.placeholder = license ? '' : 'No license on file';
         }
     });
-}
-
-// ─── Schedule Rendering ─────────────────────────────────────────────────
-function renderSchedule() {
-    const container = document.getElementById('manager-slots-list');
-    if (!container) return;
-
-    const bookings = getBookings({ date: todayISO() });
-
-    if (bookings.length === 0) {
-        container.innerHTML = `
-            <div class="flex flex-col items-center justify-center py-12 text-slate-500">
-                <span class="text-4xl mb-3">📋</span>
-                <p class="font-medium">No deliveries scheduled</p>
-                <p class="text-sm mt-1">Book a slot to get started</p>
-            </div>`;
-        return;
-    }
-
-    const statusConfig = {
-        'SCHEDULED': { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20', dot: 'bg-blue-400', label: 'Scheduled' },
-        'EN_ROUTE':  { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20', dot: 'bg-amber-400', label: 'En Route' },
-        'ARRIVED':   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', dot: 'bg-emerald-400', label: 'Arrived' },
-        'COMPLETED': { bg: 'bg-slate-500/10',  text: 'text-slate-400', border: 'border-slate-500/20', dot: 'bg-slate-400', label: 'Completed' },
-    };
-
-    container.innerHTML = bookings.map((b, i) => {
-        const sc = statusConfig[b.status] || statusConfig['SCHEDULED'];
-        return `
-        <div class="schedule-item group flex items-center gap-4 p-4 rounded-xl border ${sc.border} ${sc.bg} hover:border-white/10 transition-all duration-300 cursor-default" style="animation-delay: ${i * 60}ms">
-            <div class="flex-shrink-0 w-16 text-center">
-                <p class="text-lg font-bold text-white">${to12Hour(b.time).split(' ')[0]}</p>
-                <p class="text-xs ${sc.text}">${to12Hour(b.time).split(' ')[1]}</p>
-            </div>
-            <div class="w-px h-10 bg-white/10"></div>
-            <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${b.truckId}</p>
-                <p class="text-xs text-slate-400 mt-0.5">${b.driver || 'Unassigned'} · ${b.road}</p>
-            </div>
-            <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
-                <span class="text-xs font-medium ${sc.text}">${sc.label}</span>
-            </div>
-        </div>`;
-    }).join('');
 }
 
 // ─── Booking Modal ──────────────────────────────────────────────────────
@@ -296,7 +396,7 @@ function bindBookingEvents() {
 
         if (result.success) {
             showBookingStatus(result.message, 'success');
-            renderSchedule();
+            // Schedule will auto-update via the realtime subscription — no manual renderSchedule() needed!
             setTimeout(() => {
                 modal.classList.add('hidden');
                 modal.classList.remove('flex');
@@ -392,7 +492,7 @@ function renderConflictSuggestion(result) {
                         </div>
                     </div>
                 `;
-                renderSchedule();
+                // Schedule auto-updates via realtime subscription
                 pendingBooking = null;
 
                 const modal = document.getElementById('booking-modal');

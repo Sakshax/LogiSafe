@@ -1,12 +1,13 @@
 /**
- * scheduler.js — Conflict Detection Engine v2
+ * scheduler.js — Conflict Detection Engine v3 (Fully Realtime)
  *
  * Implements "Critical Section" logic for narrow roads.
  * On conflict, calculates and returns the NEXT AVAILABLE 30-minute slot.
- * Validates against in-memory state AND Firestore (graceful fallback).
+ * All bookings are persisted to Firestore with real-time subscriptions.
+ * Local state kept as a synchronized cache from Firestore snapshots.
  */
 
-import { db, collection, query, where, getDocs, addDoc, Timestamp, deleteDoc, doc } from '../config/firebase-config.js';
+import { db, collection, query, where, getDocs, addDoc, Timestamp, deleteDoc, doc, onSnapshot, orderBy } from '../config/firebase-config.js';
 import { to12Hour, todayISO } from '../utils/formatters.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -16,19 +17,8 @@ const SLOT_INTERVAL_MINUTES = 30;
 const DAY_START_HOUR = 7;   // 07:00 AM
 const DAY_END_HOUR = 18;    // 06:00 PM (last slot at 05:30 PM)
 
-// ─── Local State (demo fallback) ────────────────────────────────────────
+// ─── Local State (synced from Firestore snapshots) ──────────────────────
 let localBookings = [];
-
-// Seed some initial demo bookings
-export function seedDemoBookings() {
-    const today = todayISO();
-    localBookings = [
-        { id: 'demo-1', truckId: 'MH-04-AB-1234', targetSite: 'site-alpha', road: 'Kashimira Rd', date: today, time: '09:00', status: 'SCHEDULED', driver: 'Rajesh K.', createdAt: new Date(Date.now() - 3600000) },
-        { id: 'demo-2', truckId: 'MH-04-CD-5678', targetSite: 'site-alpha', road: 'Kashimira Rd', date: today, time: '11:00', status: 'SCHEDULED', driver: 'Sunil P.',  createdAt: new Date(Date.now() - 7200000) },
-        { id: 'demo-3', truckId: 'MH-04-EF-9012', targetSite: 'site-beta',  road: 'Station Rd',   date: today, time: '10:00', status: 'EN_ROUTE',  driver: 'Anil M.',   createdAt: new Date(Date.now() - 1800000) },
-        { id: 'demo-4', truckId: 'MH-04-GH-3456', targetSite: 'site-gamma', road: 'Ghodbunder Rd',date: today, time: '14:00', status: 'SCHEDULED', driver: 'Vikram S.', createdAt: new Date(Date.now() - 600000) },
-    ];
-}
 
 // ─── Time Utility Helpers ───────────────────────────────────────────────
 
@@ -85,6 +75,109 @@ function findNextAvailableSlot(road, date, requestedTime) {
 }
 
 /**
+ * Subscribe to real-time booking updates from Firestore for a given date.
+ * Calls the callback with the latest array of bookings every time the data changes.
+ *
+ * @param {string} date - YYYY-MM-DD date string to filter bookings
+ * @param {Function} callback - (bookings: Array) => void
+ * @returns {Function} unsubscribe function
+ */
+export function subscribeToBookings(date, callback) {
+    try {
+        const slotsRef = collection(db, BOOKINGS_COLLECTION);
+        const q = query(slotsRef, where('date', '==', date));
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const bookings = [];
+            snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+                bookings.push({
+                    id: docSnap.id,
+                    truckId: data.truckId || '',
+                    targetSite: data.targetSite || '',
+                    road: data.road || '',
+                    date: data.date || '',
+                    time: data.time || '',
+                    status: data.status || 'SCHEDULED',
+                    driver: data.driver || 'Unassigned',
+                    createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
+                });
+            });
+
+            // Sort by time
+            bookings.sort((a, b) => a.time.localeCompare(b.time));
+
+            // Update local cache
+            // Remove old entries for this date and replace with fresh snapshot
+            localBookings = localBookings.filter(b => b.date !== date);
+            localBookings.push(...bookings);
+
+            callback(bookings);
+        }, (error) => {
+            console.warn('Firestore bookings subscription error:', error.message);
+            // Return whatever we have locally
+            callback(localBookings.filter(b => b.date === date));
+        });
+
+        return unsubscribe;
+    } catch (err) {
+        console.warn('Could not subscribe to bookings:', err.message);
+        // Immediate callback with empty
+        callback([]);
+        return () => {};
+    }
+}
+
+/**
+ * Subscribe to ALL bookings (no date filter) for admin views.
+ *
+ * @param {Function} callback - (bookings: Array) => void
+ * @returns {Function} unsubscribe function
+ */
+export function subscribeToAllBookings(callback) {
+    try {
+        const slotsRef = collection(db, BOOKINGS_COLLECTION);
+
+        const unsubscribe = onSnapshot(slotsRef, (snapshot) => {
+            const bookings = [];
+            snapshot.forEach((docSnap) => {
+                const data = docSnap.data();
+                bookings.push({
+                    id: docSnap.id,
+                    truckId: data.truckId || '',
+                    targetSite: data.targetSite || '',
+                    road: data.road || '',
+                    date: data.date || '',
+                    time: data.time || '',
+                    status: data.status || 'SCHEDULED',
+                    driver: data.driver || 'Unassigned',
+                    createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
+                });
+            });
+
+            bookings.sort((a, b) => {
+                const dateCmp = a.date.localeCompare(b.date);
+                return dateCmp !== 0 ? dateCmp : a.time.localeCompare(b.time);
+            });
+
+            // Replace full local cache
+            localBookings = bookings;
+
+            callback(bookings);
+        }, (error) => {
+            console.warn('Firestore all-bookings subscription error:', error.message);
+            callback([...localBookings]);
+        });
+
+        return unsubscribe;
+    } catch (err) {
+        console.warn('Could not subscribe to all bookings:', err.message);
+        callback([]);
+        return () => {};
+    }
+}
+
+/**
  * Try to book a delivery slot.
  * Applies Conflict Detection: blocks overlapping slots on the same road.
  * On conflict, returns the next available 30-minute slot suggestion.
@@ -131,7 +224,7 @@ export async function bookDeliverySlot(booking) {
         }
     }
 
-    // ── Try Firestore (graceful fallback) ───────────────────────────
+    // ── Firestore: Double-check + persist ────────────────────────────
     try {
         const slotsRef = collection(db, BOOKINGS_COLLECTION);
         const q = query(slotsRef, where('road', '==', road), where('date', '==', date), where('time', '==', time));
@@ -148,37 +241,60 @@ export async function bookDeliverySlot(booking) {
             };
         }
 
-        await addDoc(slotsRef, { truckId, targetSite, road, date, time, driver, status: 'SCHEDULED', createdAt: Timestamp.now() });
+        const docRef = await addDoc(slotsRef, {
+            truckId, targetSite, road, date, time, driver,
+            status: 'SCHEDULED',
+            createdAt: Timestamp.now()
+        });
+
+        // The onSnapshot listener will automatically pick up this new booking
+        // and update the UI. No need to manually push to localBookings.
+
+        return {
+            success: true,
+            status: 'booked',
+            message: `Slot booked successfully! ${truckId} → ${road} at ${to12Hour(time)}.`,
+            booking: { id: docRef.id, truckId, targetSite, road, date, time, driver, status: 'SCHEDULED', createdAt: new Date() }
+        };
     } catch (err) {
-        console.warn('Firestore unavailable, booking saved locally:', err.message);
+        console.warn('Firestore write failed, saving locally:', err.message);
+
+        // Fallback: local-only booking
+        const newBooking = {
+            id: `local-${Date.now()}`,
+            truckId, targetSite, road, date, time, driver,
+            status: 'SCHEDULED',
+            createdAt: new Date()
+        };
+        localBookings.push(newBooking);
+
+        return {
+            success: true,
+            status: 'booked',
+            message: `Slot booked locally! ${truckId} → ${road} at ${to12Hour(time)}. (Offline mode)`,
+            booking: newBooking
+        };
     }
-
-    // ── Local state update ──────────────────────────────────────────
-    const newBooking = {
-        id: `booking-${Date.now()}`,
-        truckId, targetSite, road, date, time, driver,
-        status: 'SCHEDULED',
-        createdAt: new Date()
-    };
-    localBookings.push(newBooking);
-
-    return {
-        success: true,
-        status: 'booked',
-        message: `Slot booked successfully! ${truckId} → ${road} at ${to12Hour(time)}.`,
-        booking: newBooking
-    };
 }
 
 /**
- * Cancel a booking by ID.
+ * Cancel a booking by ID (removes from Firestore + local cache).
  */
-export function cancelBooking(bookingId) {
+export async function cancelBooking(bookingId) {
+    // Remove locally
     localBookings = localBookings.filter(b => b.id !== bookingId);
+
+    // Remove from Firestore
+    try {
+        await deleteDoc(doc(db, BOOKINGS_COLLECTION, bookingId));
+    } catch (e) {
+        console.warn('Could not delete from Firestore:', e.message);
+    }
 }
 
 /**
- * Get all bookings, optionally filtered by date and/or site.
+ * Get all bookings from local cache, optionally filtered.
+ * (Primarily used as a synchronous read of the cached data)
  */
 export function getBookings({ date, targetSite, road } = {}) {
     let result = [...localBookings];
@@ -189,10 +305,19 @@ export function getBookings({ date, targetSite, road } = {}) {
 }
 
 /**
- * Update booking status.
+ * Update booking status in Firestore + local cache.
  */
-export function updateBookingStatus(bookingId, status) {
+export async function updateBookingStatus(bookingId, status) {
     const booking = localBookings.find(b => b.id === bookingId);
     if (booking) booking.status = status;
+
+    // Sync to Firestore
+    try {
+        const { setDoc, doc: firestoreDoc } = await import('../config/firebase-config.js');
+        await setDoc(firestoreDoc(db, BOOKINGS_COLLECTION, bookingId), { status }, { merge: true });
+    } catch (e) {
+        console.warn('Could not update status in Firestore:', e.message);
+    }
+
     return booking;
 }
