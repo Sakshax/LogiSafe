@@ -11,7 +11,7 @@
  *    Ready for Next Assignment" state (prevents dead-screen)
  */
 
-import { startTracking, stopTracking, isTrackingActive } from '../modules/tracking.js';
+import { startTracking, stopTracking, isTrackingActive, setDestination, getGeofenceRadius } from '../modules/tracking.js';
 import { uploadCompliancePhoto, simulateUpload } from '../modules/compliance.js';
 import { DEMO_SITES } from '../config/maps-config.js';
 
@@ -19,6 +19,7 @@ let initialized = false;
 let trackingActive = false;
 let complianceUnlocked = false;
 let tripCompleted = false;
+let latestDistanceKm = 999;
 
 // DOM references
 let els = {};
@@ -30,14 +31,14 @@ const currentTrip = {
     bookingId: 'booking-demo-001'
 };
 
-export function initDriverView() {
+export async function initTrackingLinkView(trackToken) {
     if (initialized) return;
     initialized = true;
     tripCompleted = false;
 
     // Cache DOM
     els = {
-        view: document.getElementById('driver-view'),
+        view: document.getElementById('tracking-link-view'),
         trackBtn: document.getElementById('start-tracking-btn'),
         btnIcon: document.getElementById('tracking-btn-icon'),
         btnLabel: document.getElementById('tracking-btn-label'),
@@ -55,6 +56,33 @@ export function initDriverView() {
         uploadStatus: document.getElementById('upload-status-text'),
     };
 
+    // Parse Token
+    let bookingId = 'booking-demo-001';
+    try { if (trackToken) bookingId = atob(trackToken).replace('booking_', ''); } catch (e) {}
+    currentTrip.bookingId = bookingId;
+
+    // Fetch Destination
+    try {
+        const { db, doc, getDoc } = await import('../config/firebase-config.js');
+        const snap = await getDoc(doc(db, 'logistics_slots', bookingId));
+        if (snap.exists()) {
+            const data = snap.data();
+            let destLat, destLng, siteNameStr;
+            if (data.customLat && data.customLng) {
+                destLat = data.customLat;
+                destLng = data.customLng;
+                siteNameStr = data.customAddress || 'Custom Location';
+            } else {
+                const siteObj = DEMO_SITES.find(s => s.id === data.targetSite) || DEMO_SITES[0];
+                destLat = siteObj.lat;
+                destLng = siteObj.lng;
+                siteNameStr = siteObj.name;
+            }
+            currentTrip.site = { lat: destLat, lng: destLng, name: siteNameStr };
+            setDestination({ lat: destLat, lng: destLng });
+        }
+    } catch(e) {}
+
     // Set site name
     if (els.siteName) els.siteName.textContent = currentTrip.site.name;
 
@@ -64,7 +92,7 @@ export function initDriverView() {
     if (els.photoInput) els.photoInput.addEventListener('change', handlePhotoUpload);
 }
 
-export function destroyDriverView() {
+export function destroyTrackingLinkView() {
     if (trackingActive) {
         stopTracking();
         trackingActive = false;
@@ -78,18 +106,24 @@ export function destroyDriverView() {
 function handleTrackToggle() {
     // If trip was completed, reset everything for next assignment
     if (tripCompleted) {
-        tripCompleted = false;
-        currentTrip.driverId = 'driver-' + Date.now();
-        currentTrip.bookingId = 'booking-' + Date.now();
-        resetDriverUI();
-        return;
+        return; // Link expired, do nothing
     }
 
     if (trackingActive) {
         // STOP
+        if (latestDistanceKm > getGeofenceRadius()) {
+            alert(`You are not at the location. Please drive to the destination (Distance: ${latestDistanceKm.toFixed(2)} km) before stopping.`);
+            return;
+        }
+
         stopTracking();
         trackingActive = false;
-        resetDriverUI();
+        
+        // Ensure compliance unlocks if for some reason geofence trigger missed
+        if (!complianceUnlocked) onGeofenceEnter(latestDistanceKm);
+
+        setStatus('Arrived at Location', 'amber');
+        if (els.btnLabel) els.btnLabel.textContent = 'ARRIVED';
     } else {
         // START
         trackingActive = true;
@@ -106,6 +140,7 @@ function handleTrackToggle() {
 
 // ─── Position Update Callback ───────────────────────────────────────────
 function onPositionUpdate(distanceKm, lat, lng) {
+    latestDistanceKm = distanceKm;
     if (els.distText) els.distText.textContent = `${distanceKm.toFixed(2)} km`;
 
     // Rough ETA estimate (avg city speed 25 km/h)
@@ -133,13 +168,13 @@ function onGeofenceEnter(distanceKm) {
 
     if (els.complianceInstructions) {
         els.complianceInstructions.innerHTML = `
-            <span class="text-emerald-400 font-semibold">🎯 Site Ready Alert!</span>
-            <span class="text-slate-300 ml-1">You are ${(distanceKm * 1000).toFixed(0)}m from ${currentTrip.site.name}. Capture proof of dust mitigation to complete delivery.</span>`;
+            <span class="text-emerald-400 font-semibold">📸 Photo Required!</span>
+            <span class="text-slate-300 ml-1">Upload a departing photo of the truck to complete.</span>`;
     }
 
     if (els.uploadBtn) {
         els.uploadBtn.disabled = false;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-semibold transition-all duration-300 active:scale-[0.97]';
+        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#7A8C3E] text-white py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest hover:bg-[#6c7d36] transition-all duration-300 active:scale-[0.97]';
     }
 }
 
@@ -153,9 +188,9 @@ async function handlePhotoUpload(e) {
     if (els.uploadBtn) {
         els.uploadBtn.innerHTML = `
             <span class="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-            <span>Uploading proof...</span>`;
+            <span>UPLOADING PROOF...</span>`;
         els.uploadBtn.disabled = true;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-amber-600 text-white py-4 rounded-2xl font-semibold cursor-wait';
+        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#1C1C1C] text-white py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest cursor-wait';
     }
 
     try {
@@ -180,8 +215,8 @@ function completeDelivery(photoUrl) {
     if (els.uploadBtn) {
         els.uploadBtn.innerHTML = `
             <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-            <span>Compliance Verified</span>`;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-emerald-600 text-white py-4 rounded-2xl font-semibold';
+            <span>VERIFIED BY SYSTEM</span>`;
+        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#F8FAFC] text-[#7A8C3E] border border-[#7A8C3E]/20 py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest';
         els.uploadBtn.disabled = true;
     }
 
@@ -205,8 +240,7 @@ function completeDelivery(photoUrl) {
 
 // ─── Trip Completed State ───────────────────────────────────────────────
 /**
- * Renders the "Trip Completed. Ready for Next Assignment" screen.
- * Replaces the tracking/compliance UI to prevent a dead-screen.
+ * Renders the "Link Expired" screen.
  */
 function showTripCompletedState() {
     tripCompleted = true;
@@ -219,37 +253,18 @@ function showTripCompletedState() {
     setStatus('Trip Completed', 'emerald');
     if (els.distText) els.distText.textContent = '0.00 km';
     if (els.etaText) els.etaText.textContent = '0 min';
-    if (els.siteName) els.siteName.textContent = '✅ Assignment Finished';
+    if (els.siteName) els.siteName.textContent = '✅ Verified & Closed';
 
-    // ── Transform the tracking button into "Next Assignment" ────────
-    if (els.btnIcon) {
-        els.btnIcon.innerHTML = `
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-        `;
-    }
-    if (els.btnLabel) els.btnLabel.textContent = 'NEXT';
+    // Disable track button
+    if (els.trackBtn) els.trackBtn.style.display = 'none';
 
-    // Change button color to blue glow
-    const core = els.trackBtn?.querySelector('.track-btn-core');
-    if (core) {
-        core.style.background = 'linear-gradient(135deg, #2563eb, #7c3aed)';
-        core.style.borderColor = '#1e1b4b';
-        core.style.boxShadow = '0 0 50px -5px rgba(99, 102, 241, 0.4), inset 0 2px 10px rgba(0,0,0,0.4)';
-    }
-
-    // Update ring colors
-    const ring1 = els.trackBtn?.querySelector('.track-btn-ring-1');
-    const ring2 = els.trackBtn?.querySelector('.track-btn-ring-2');
-    if (ring1) ring1.style.background = 'rgba(99, 102, 241, 0.12)';
-    if (ring2) ring2.style.background = 'rgba(99, 102, 241, 0.2)';
-
-    // ── Transform compliance section → Trip Summary ─────────────────
+    // ── Transform compliance section → Link Expired ─────────────────
     const cs = els.complianceSection;
     if (cs) {
         cs.classList.remove('opacity-40', 'pointer-events-none', 'translate-y-4');
         cs.classList.add('opacity-100');
         cs.innerHTML = `
-            <div class="text-center py-4">
+            <div class="text-center py-6">
                 <!-- Success checkmark -->
                 <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/15 border-2 border-emerald-500/30 flex items-center justify-center">
                     <svg class="w-8 h-8 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
@@ -257,26 +272,12 @@ function showTripCompletedState() {
                     </svg>
                 </div>
 
-                <h3 class="text-lg font-bold text-white mb-1">Trip Completed</h3>
-                <p class="text-emerald-400 text-sm font-medium mb-4">Ready for Next Assignment</p>
+                <h3 class="text-xl font-bold text-white mb-2">Departing Verified</h3>
+                <p class="text-amber-400 text-sm font-medium mb-4">This tracking link is now expired.</p>
 
-                <!-- Trip Summary -->
-                <div class="grid grid-cols-3 gap-3 mt-4 mb-2">
-                    <div class="bg-slate-800/50 rounded-xl p-3">
-                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Site</p>
-                        <p class="text-xs text-white font-semibold mt-1 truncate">${currentTrip.site.name.split('–')[0].trim()}</p>
-                    </div>
-                    <div class="bg-slate-800/50 rounded-xl p-3">
-                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Status</p>
-                        <p class="text-xs text-emerald-400 font-semibold mt-1">Verified ✓</p>
-                    </div>
-                    <div class="bg-slate-800/50 rounded-xl p-3">
-                        <p class="text-[10px] text-slate-500 uppercase tracking-wider">Time</p>
-                        <p class="text-xs text-white font-semibold mt-1">${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</p>
-                    </div>
-                </div>
-
-                <p class="text-slate-500 text-xs mt-4">Tap the <span class="text-violet-400 font-semibold">NEXT</span> button above to start a new assignment</p>
+                <p class="text-slate-500 text-xs mt-4">You may safely close this page.</p>
+                
+                <button onclick="window.close()" class="mt-6 px-6 py-2.5 bg-slate-700 hover:bg-slate-600 rounded-xl text-sm text-white font-semibold transition-all">Close Window</button>
             </div>
         `;
     }

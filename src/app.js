@@ -12,7 +12,9 @@
 import { onAuthChange, loginWithEmail, registerUser, mockLogin, logout, getRole, ROLES } from './modules/auth.js';
 import { initAdminView, destroyAdminView } from './ui/admin-view.js';
 import { initManagerView, destroyManagerView } from './ui/manager-view.js';
-import { initDriverView, destroyDriverView } from './ui/driver-view.js';
+import { initDriverProfileView, destroyDriverProfileView } from './ui/driver-profile-view.js';
+import { initTrackingLinkView, destroyTrackingLinkView } from './ui/tracking-link-view.js';
+import { stopTracking } from './modules/tracking.js';
 
 // ─── DOM Cache ──────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -25,6 +27,17 @@ document.addEventListener('DOMContentLoaded', () => {
     bindMockLoginEvents();
     bindLogout();
 
+    // Check for temporary tracking link
+    const urlParams = new URLSearchParams(window.location.search);
+    const trackToken = urlParams.get('track_token');
+    
+    if (trackToken) {
+        // Bypass normal auth and open tracking immediately
+        showView('tracking-link-view');
+        initTrackingLinkView(trackToken);
+        return;
+    }
+
     // Listen for auth state changes
     onAuthChange((user, role) => {
         if (user && role) {
@@ -36,10 +49,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Start with auth view
     showAuthView();
+
+    // Clean up tracking on window close
+    window.addEventListener('beforeunload', () => {
+        stopTracking();
+    });
 });
 
 // ─── View Router ────────────────────────────────────────────────────────
-const VIEW_IDS = ['auth-view', 'admin-view', 'manager-view', 'driver-view'];
+const VIEW_IDS = ['auth-view', 'admin-view', 'manager-view', 'driver-profile-view', 'tracking-link-view'];
 
 function hideAllViews() {
     VIEW_IDS.forEach(id => {
@@ -65,12 +83,16 @@ function showView(viewId) {
 function showAuthView() {
     destroyAdminView();
     destroyManagerView();
-    destroyDriverView();
+    destroyDriverProfileView();
+    destroyTrackingLinkView();
 
     showView('auth-view');
 
     const userControls = $('user-controls');
     if (userControls) userControls.classList.add('hidden');
+    const guestControls = $('guest-controls');
+    if (guestControls) guestControls.classList.remove('hidden');
+    
     $('nav-logo-subtitle')?.classList.add('hidden');
 
     // Reset to login tab
@@ -80,12 +102,19 @@ function showAuthView() {
 function showDashboard(role) {
     destroyAdminView();
     destroyManagerView();
-    destroyDriverView();
+    destroyDriverProfileView();
+    destroyTrackingLinkView();
 
-    showView(`${role}-view`);
+    if (role === ROLES.DRIVER) {
+        showView('driver-profile-view');
+    } else {
+        showView(`${role}-view`);
+    }
 
     const userControls = $('user-controls');
     if (userControls) userControls.classList.remove('hidden');
+    const guestControls = $('guest-controls');
+    if (guestControls) guestControls.classList.add('hidden');
 
     const badge = $('user-role-badge');
     if (badge) {
@@ -108,7 +137,7 @@ function showDashboard(role) {
     switch (role) {
         case ROLES.ADMIN:   initAdminView();   break;
         case ROLES.MANAGER: initManagerView(); break;
-        case ROLES.DRIVER:  initDriverView();  break;
+        case ROLES.DRIVER:  initDriverProfileView();  break;
     }
 
     showToast(`Welcome! ${role.charAt(0).toUpperCase() + role.slice(1)} dashboard loaded.`, 'success');
@@ -264,18 +293,25 @@ function bindRegisterFormEvents() {
                 return;
             }
 
-            // Validate truck license for drivers
+            // Validate truck license and mobile for drivers
             const truckLicense = $('reg-truck-license')?.value?.trim();
-            if (role === 'driver' && !truckLicense) {
-                showStatusMessage('register-status', 'Please enter your truck license number.', 'error');
-                return;
+            const mobile = $('reg-mobile')?.value?.trim();
+            if (role === 'driver') {
+                if (!truckLicense) {
+                    showStatusMessage('register-status', 'Please enter your truck license number.', 'error');
+                    return;
+                }
+                if (!mobile) {
+                    showStatusMessage('register-status', 'Please enter your mobile number.', 'error');
+                    return;
+                }
             }
 
             registerBtn.disabled = true;
             registerBtn.innerHTML = '<span class="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>';
             hideStatusMessage('register-status');
 
-            const result = await registerUser({ name, email, password, role, truckLicense });
+            const result = await registerUser({ name, email, password, role, truckLicense, mobile });
 
             registerBtn.disabled = false;
             registerBtn.innerHTML = 'Create Account';
@@ -287,6 +323,7 @@ function bindRegisterFormEvents() {
                 if ($('reg-email')) $('reg-email').value = '';
                 if ($('reg-password')) $('reg-password').value = '';
                 if ($('reg-truck-license')) $('reg-truck-license').value = '';
+                if ($('reg-mobile')) $('reg-mobile').value = '';
 
                 // Auto-switch to login after 3 seconds
                 setTimeout(() => switchToTab('login'), 3000);

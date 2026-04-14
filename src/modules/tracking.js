@@ -7,7 +7,7 @@
  */
 
 import { calculateDistance } from '../utils/haversine.js';
-import { db, doc, setDoc, serverTimestamp, collection, onSnapshot, deleteDoc } from '../config/firebase-config.js';
+import { db, doc, setDoc, addDoc, serverTimestamp, collection, onSnapshot, deleteDoc } from '../config/firebase-config.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────
 const GEOFENCE_RADIUS_KM = 0.5; // 500 meters
@@ -18,6 +18,9 @@ let watchId = null;
 let hasTriggeredGeofence = false;
 let destinationCoords = { lat: 19.2813, lng: 72.8808 };
 let simulationInterval = null;
+let currentTrackingId = null; // Store active session ID for cleanup
+let lastLat = null;
+let lastLng = null;
 
 /**
  * Set the destination site coordinates for geofencing.
@@ -51,6 +54,9 @@ export function startTracking(driverId, onPositionUpdate, onGeofenceEnter, onErr
     }
 
     hasTriggeredGeofence = false;
+    currentTrackingId = driverId;
+    lastLat = null;
+    lastLng = null;
 
     watchId = navigator.geolocation.watchPosition(
         async (position) => {
@@ -71,6 +77,15 @@ export function startTracking(driverId, onPositionUpdate, onGeofenceEnter, onErr
  * Process a new GPS position — compute distance, sync, evaluate geofence.
  */
 async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceEnter) {
+    // Avoid jitter: Only process if movement is > 10 meters (0.01 km) or if it's the first ping
+    if (lastLat !== null && lastLng !== null) {
+        const movedKm = calculateDistance(lastLat, lastLng, lat, lng);
+        if (movedKm < 0.01) return; // Haven't really moved
+    }
+
+    lastLat = lat;
+    lastLng = lng;
+
     // Sync to Firestore (best-effort)
     try {
         const driverRef = doc(db, ACTIVE_TRUCKS_COLLECTION, driverId);
@@ -78,6 +93,8 @@ async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceE
             lat,
             lng,
             driverId,
+            destLat: destinationCoords.lat,
+            destLng: destinationCoords.lng,
             lastUpdate: serverTimestamp()
         }, { merge: true });
     } catch (e) {
@@ -91,6 +108,21 @@ async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceE
     // Geofence check
     if (distanceKm <= GEOFENCE_RADIUS_KM && !hasTriggeredGeofence) {
         hasTriggeredGeofence = true;
+        
+        // Push Real-time Alert to Manager
+        try {
+            await addDoc(collection(db, 'live_alerts'), {
+                type: 'geofence_entry',
+                driverId: driverId,
+                title: `Arrving: ${driverId}`,
+                detail: `Driver has entered the 500m geofence.`,
+                lat: lat,
+                lng: lng,
+                time: serverTimestamp(),
+                severity: 'info'
+            });
+        } catch (e) {}
+
         if (onGeofenceEnter) onGeofenceEnter(distanceKm);
     }
 }
@@ -129,6 +161,8 @@ function startSimulation(driverId, onPositionUpdate, onGeofenceEnter) {
  * @param {string} [driverId] - If provided, removes the truck doc from Firestore
  */
 export async function stopTracking(driverId) {
+    const idToClean = driverId || currentTrackingId;
+
     if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
         watchId = null;
@@ -138,14 +172,20 @@ export async function stopTracking(driverId) {
         simulationInterval = null;
     }
     hasTriggeredGeofence = false;
+    lastLat = null;
+    lastLng = null;
 
     // Remove this truck from activeTrucks so the manager map clears it
-    if (driverId) {
+    if (idToClean) {
         try {
-            await deleteDoc(doc(db, ACTIVE_TRUCKS_COLLECTION, driverId));
+            await deleteDoc(doc(db, ACTIVE_TRUCKS_COLLECTION, idToClean));
         } catch (e) {
             // Silent fail
         }
+    }
+    
+    if (!driverId || driverId === currentTrackingId) {
+        currentTrackingId = null;
     }
 }
 
@@ -171,17 +211,27 @@ export function listenToActiveTrucks(callback) {
 
         const unsubscribe = onSnapshot(trucksRef, (snapshot) => {
             const trucks = [];
+            const now = new Date();
+            const staleThresholdMs = 2 * 60 * 1000; // 2 minutes
+
             snapshot.forEach((docSnap) => {
                 const data = docSnap.data();
-                trucks.push({
-                    id: docSnap.id,
-                    lat: data.lat,
-                    lng: data.lng,
-                    driverId: data.driverId || docSnap.id,
-                    truckId: data.truckId || docSnap.id,
-                    driver: data.driver || data.driverId || docSnap.id,
-                    lastUpdate: data.lastUpdate?.toDate ? data.lastUpdate.toDate() : new Date(),
-                });
+                const lastUpdate = data.lastUpdate?.toDate ? data.lastUpdate.toDate() : new Date();
+                
+                // Only include trucks updated within the last 2 minutes
+                if (now - lastUpdate < staleThresholdMs) {
+                    trucks.push({
+                        id: docSnap.id,
+                        lat: data.lat,
+                        lng: data.lng,
+                        destLat: data.destLat,
+                        destLng: data.destLng,
+                        driverId: data.driverId || docSnap.id,
+                        truckId: data.truckId || docSnap.id,
+                        driver: data.driver || data.driverId || docSnap.id,
+                        lastUpdate: lastUpdate,
+                    });
+                }
             });
 
             callback(trucks);

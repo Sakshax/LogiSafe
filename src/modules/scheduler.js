@@ -98,8 +98,11 @@ export function subscribeToBookings(date, callback) {
                     road: data.road || '',
                     date: data.date || '',
                     time: data.time || '',
-                    status: data.status || 'SCHEDULED',
-                    driver: data.driver || 'Unassigned',
+                    status: data.status || 'PENDING_ADMIN',
+                    driver: data.driver || 'Pending Assignment',
+                    customAddress: data.customAddress || '',
+                    customLat: data.customLat || null,
+                    customLng: data.customLng || null,
                     createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
                 });
             });
@@ -149,8 +152,11 @@ export function subscribeToAllBookings(callback) {
                     road: data.road || '',
                     date: data.date || '',
                     time: data.time || '',
-                    status: data.status || 'SCHEDULED',
-                    driver: data.driver || 'Unassigned',
+                    status: data.status || 'PENDING_ADMIN',
+                    driver: data.driver || 'Pending Assignment',
+                    customAddress: data.customAddress || '',
+                    customLat: data.customLat || null,
+                    customLng: data.customLng || null,
                     createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
                 });
             });
@@ -241,9 +247,15 @@ export async function bookDeliverySlot(booking) {
             };
         }
 
+        const status = driver ? 'SCHEDULED' : 'PENDING_ADMIN';
         const docRef = await addDoc(slotsRef, {
-            truckId, targetSite, road, date, time, driver,
-            status: 'SCHEDULED',
+            truckId: truckId || 'Pending Assignment', 
+            targetSite, road, date, time, 
+            driver: driver || '',
+            customAddress: booking.customAddress || '',
+            customLat: booking.customLat || null,
+            customLng: booking.customLng || null,
+            status: status,
             createdAt: Timestamp.now()
         });
 
@@ -252,9 +264,9 @@ export async function bookDeliverySlot(booking) {
 
         return {
             success: true,
-            status: 'booked',
-            message: `Slot booked successfully! ${truckId} → ${road} at ${to12Hour(time)}.`,
-            booking: { id: docRef.id, truckId, targetSite, road, date, time, driver, status: 'SCHEDULED', createdAt: new Date() }
+            status: 'requested',
+            message: `Slot requested successfully! Request sent to Admin for driver assignment at ${to12Hour(time)}.`,
+            booking: { id: docRef.id, truckId: truckId || 'Pending', targetSite, road, date, time, driver: driver || '', status: status, createdAt: new Date() }
         };
     } catch (err) {
         console.warn('Firestore write failed, saving locally:', err.message);
@@ -262,16 +274,16 @@ export async function bookDeliverySlot(booking) {
         // Fallback: local-only booking
         const newBooking = {
             id: `local-${Date.now()}`,
-            truckId, targetSite, road, date, time, driver,
-            status: 'SCHEDULED',
+            truckId: truckId || 'Pending Assignment', targetSite, road, date, time, driver: driver || '',
+            status: driver ? 'SCHEDULED' : 'PENDING_ADMIN',
             createdAt: new Date()
         };
         localBookings.push(newBooking);
 
         return {
             success: true,
-            status: 'booked',
-            message: `Slot booked locally! ${truckId} → ${road} at ${to12Hour(time)}. (Offline mode)`,
+            status: 'requested',
+            message: `Slot requested locally at ${to12Hour(time)}. (Offline mode)`,
             booking: newBooking
         };
     }
@@ -320,4 +332,20 @@ export async function updateBookingStatus(bookingId, status) {
     }
 
     return booking;
+}
+
+export async function assignDriverAndSendLink(bookingId, driver, truckId) {
+    const trackingToken = btoa(`booking_${bookingId}`);
+    try {
+        const { setDoc, doc: firestoreDoc } = await import('../config/firebase-config.js');
+        await setDoc(firestoreDoc(db, BOOKINGS_COLLECTION, bookingId), { 
+            status: 'SCHEDULED', 
+            driver: driver,
+            truckId: truckId,
+            trackingToken: trackingToken
+        }, { merge: true });
+    } catch (e) {
+        console.warn('Could not assign driver in Firestore:', e.message);
+    }
+    return trackingToken;
 }

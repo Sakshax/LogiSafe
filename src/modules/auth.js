@@ -113,12 +113,12 @@ export async function loginWithEmail(email, password) {
 /**
  * Register a new Manager or Driver account.
  * - Manager: immediately active.
- * - Driver: status='pending', needs admin approval. Must include truckLicense.
+ * - Driver: status='pending', needs admin approval. Must include truckLicense and mobile.
  *
- * @param {{ name: string, email: string, password: string, role: 'manager'|'driver', truckLicense?: string }} data
+ * @param {{ name: string, email: string, password: string, role: 'manager'|'driver', truckLicense?: string, mobile?: string }} data
  * @returns {{ success: boolean, message?: string, error?: string }}
  */
-export async function registerUser({ name, email, password, role, truckLicense }) {
+export async function registerUser({ name, email, password, role, truckLicense, mobile }) {
     // Block admin registration
     if (role === ROLES.ADMIN) {
         return { success: false, error: 'Admin accounts cannot be registered.' };
@@ -147,9 +147,10 @@ export async function registerUser({ name, email, password, role, truckLicense }
             registeredAt: Timestamp.now()
         };
 
-        // Add truck license for drivers
-        if (role === ROLES.DRIVER && truckLicense) {
-            userProfile.truckLicense = truckLicense.toUpperCase().trim();
+        // Add truck license and mobile for drivers
+        if (role === ROLES.DRIVER) {
+            if (truckLicense) userProfile.truckLicense = truckLicense.toUpperCase().trim();
+            if (mobile) userProfile.mobile = mobile.trim();
         }
 
         await setDoc(doc(db, 'users', uid), userProfile);
@@ -193,7 +194,9 @@ export function mockLogin(emailOrRole) {
     currentUser = {
         uid: `demo-${role}-${Date.now()}`,
         email: `${role}@logisafe.demo`,
-        displayName: role.charAt(0).toUpperCase() + role.slice(1) + ' User'
+        displayName: role.charAt(0).toUpperCase() + role.slice(1) + ' User',
+        mobile: role === ROLES.DRIVER ? '+91 9766802047' : undefined,
+        truckLicense: role === ROLES.DRIVER ? 'MH-04-XX-1111' : undefined
     };
     currentRole = role;
     if (authChangeCallback) authChangeCallback(currentUser, currentRole);

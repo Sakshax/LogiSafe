@@ -10,14 +10,18 @@
  *  - Live truck count indicator
  */
 
-import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon } from '../config/maps-config.js';
+import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION } from '../config/maps-config.js';
 import { bookDeliverySlot, subscribeToBookings } from '../modules/scheduler.js';
 import { listenToActiveTrucks } from '../modules/tracking.js';
 import { getApprovedDrivers } from '../modules/auth.js';
-import { to12Hour, todayISO } from '../utils/formatters.js';
+import { to12Hour, todayISO, timeAgo } from '../utils/formatters.js';
 
 let managerMap = null;
 let initialized = false;
+
+// Mini-map for location pinning
+let miniMap = null;
+let miniMapMarker = null;
 
 // Currently selected site
 let selectedSite = DEMO_SITES[0];
@@ -34,6 +38,7 @@ let unsubscribeTrucks = null;
 
 // Map marker dictionary for live trucks { truckId: L.marker }
 let truckMarkers = {};
+let truckPaths = {}; // Store routing polylines
 
 export async function initManagerView() {
     if (initialized) return;
@@ -48,7 +53,6 @@ export async function initManagerView() {
     }
 
     bindBookingEvents();
-    await loadApprovedDrivers();
     await initLiveMap();
     startRealtimeSchedule();
     startRealtimeTruckTracking();
@@ -111,28 +115,34 @@ function renderSchedule(bookings) {
     }
 
     const statusConfig = {
-        'SCHEDULED': { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20', dot: 'bg-blue-400', label: 'Scheduled' },
-        'EN_ROUTE':  { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20', dot: 'bg-amber-400', label: 'En Route' },
-        'ARRIVED':   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', dot: 'bg-emerald-400', label: 'Arrived' },
-        'COMPLETED': { bg: 'bg-slate-500/10',  text: 'text-slate-400', border: 'border-slate-500/20', dot: 'bg-slate-400', label: 'Completed' },
+        'SCHEDULED': { text: 'text-[#7A8C3E]', dot: 'bg-[#7A8C3E]', label: 'Scheduled' },
+        'EN_ROUTE':  { text: 'text-[#F4A623]', dot: 'bg-[#F4A623]', label: 'En Route' },
+        'ARRIVED':   { text: 'text-[#1C1C1C]', dot: 'bg-[#1C1C1C]', label: 'Arrived' },
+        'COMPLETED': { text: 'text-[#64748B]', dot: 'bg-[#64748B]', label: 'Completed' },
     };
 
     container.innerHTML = bookings.map((b, i) => {
         const sc = statusConfig[b.status] || statusConfig['SCHEDULED'];
+        const timeStr = to12Hour(b.time);
         return `
-        <div class="schedule-item group flex items-center gap-4 p-4 rounded-xl border ${sc.border} ${sc.bg} hover:border-white/10 transition-all duration-300 cursor-default" style="animation-delay: ${i * 60}ms">
-            <div class="flex-shrink-0 w-16 text-center">
-                <p class="text-lg font-bold text-white">${to12Hour(b.time).split(' ')[0]}</p>
-                <p class="text-xs ${sc.text}">${to12Hour(b.time).split(' ')[1]}</p>
+        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-300" style="animation-delay: ${i * 60}ms">
+            <div class="w-16 text-center border-r border-[#1C1C1C]/10 pr-6">
+                <p class="text-[10px] font-extrabold text-[#1C1C1C]">${timeStr.split(' ')[0]}</p>
+                <p class="text-[9px] font-bold text-[#64748B] uppercase">${timeStr.split(' ')[1]}</p>
             </div>
-            <div class="w-px h-10 bg-white/10"></div>
             <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${b.truckId}</p>
-                <p class="text-xs text-slate-400 mt-0.5">${b.driver || 'Unassigned'} · ${b.road}</p>
+                <p class="ui-label text-[#7A8C3E] mb-1">/ Tracking Active</p>
+                <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${b.truckId}</p>
+                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${b.road}</p>
+                ${b.material ? `
+                    <div class="mt-2 flex">
+                        <span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>
+                    </div>
+                ` : ''}
             </div>
             <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
-                <span class="text-xs font-medium ${sc.text}">${sc.label}</span>
+                <span class="w-1.5 h-1.5 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
+                <span class="ui-label ${sc.text}">${sc.label}</span>
             </div>
         </div>`;
     }).join('');
@@ -146,6 +156,37 @@ function startRealtimeTruckTracking() {
     unsubscribeTrucks = listenToActiveTrucks((trucks) => {
         updateTruckCountIndicator(trucks.length);
         reconcileTruckMarkers(trucks);
+    });
+
+    // Realtime Manager Alerts for Geofence
+    try {
+        const { collection, onSnapshot } = window.firebaseFirestoreVars || {}; // If not available, we use direct import
+    } catch(e){}
+    import('../config/firebase-config.js').then(({ db, collection, onSnapshot }) => {
+        let isInitialLoad = true;
+        onSnapshot(collection(db, 'live_alerts'), (snapshot) => {
+            if (isInitialLoad) { isInitialLoad = false; return; } // Skip historical alerts
+            
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === 'added') {
+                    const data = change.doc.data();
+                    if (data.type === 'geofence_entry') {
+                        // Display an immediate alert UI overlay to Manager
+                        const alertBox = document.createElement('div');
+                        alertBox.className = 'fixed top-24 right-8 z-50 bg-[#E05535] text-white p-4 rounded-xl shadow-2xl flex items-center gap-3 max-w-sm animate-bounce';
+                        alertBox.innerHTML = `
+                            <span class="text-2xl">🚨</span>
+                            <div>
+                                <p class="font-bold text-sm tracking-widest uppercase mb-1">Driver Approaching</p>
+                                <p class="text-xs opacity-90">${data.title}: ${data.detail}</p>
+                            </div>
+                        `;
+                        document.body.appendChild(alertBox);
+                        setTimeout(() => alertBox.remove(), 8000);
+                    }
+                }
+            });
+        });
     });
 }
 
@@ -170,44 +211,72 @@ function reconcileTruckMarkers(trucks) {
 
     const currentIds = new Set(trucks.map(t => t.id));
 
-    // Remove markers for trucks that are no longer active
+    // Update or Add
+    trucks.forEach(truck => {
+        if (!truck.lat || !truck.lng) return;
+
+        const timeStr = truck.lastUpdate ? timeAgo(truck.lastUpdate) : 'Just now';
+
+        const popupContent = `
+            <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong>
+                </div>
+                <div style="color:#666;font-size:11px;margin-bottom:4px">
+                    Driver: ${truck.driver || 'Unknown'}
+                </div>
+                <div style="display:flex;align-items:center;justify-content:between;border-top:1px solid #eee;padding-top:4px;margin-top:4px">
+                    <span style="color:#059669;font-size:11px;font-weight:600">LIVE TRACKING</span>
+                    <span style="color:#94a3b8;font-size:10px;margin-left:auto">${timeStr}</span>
+                </div>
+            </div>
+        `;
+
+        // Update Marker
+        if (truckMarkers[truck.id]) {
+            truckMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
+            truckMarkers[truck.id].setPopupContent(popupContent);
+        } else {
+            const icon = createTruckIcon();
+            const marker = L.marker([truck.lat, truck.lng], { icon }).addTo(managerMap);
+            marker.bindPopup(popupContent);
+            truckMarkers[truck.id] = marker;
+        }
+
+        // Draw/Update routing path (polyline)
+        if (truck.destLat && truck.destLng) {
+            const pathPoints = [
+                [truck.lat, truck.lng],
+                [truck.destLat, truck.destLng]
+            ];
+            
+            if (truckPaths[truck.id]) {
+                truckPaths[truck.id].setLatLngs(pathPoints);
+            } else {
+                truckPaths[truck.id] = L.polyline(pathPoints, {
+                    color: '#7A8C3E',
+                    weight: 3,
+                    opacity: 0.6,
+                    dashArray: '8, 8',
+                    lineJoin: 'round'
+                }).addTo(managerMap);
+            }
+        }
+    });
+
+    // Cleanup markers and paths
     for (const id of Object.keys(truckMarkers)) {
         if (!currentIds.has(id)) {
             managerMap.removeLayer(truckMarkers[id]);
             delete truckMarkers[id];
+            
+            if (truckPaths[id]) {
+                managerMap.removeLayer(truckPaths[id]);
+                delete truckPaths[id];
+            }
         }
     }
-
-    // Add or update markers
-    trucks.forEach(truck => {
-        if (!truck.lat || !truck.lng) return;
-
-        if (truckMarkers[truck.id]) {
-            // Smoothly move existing marker
-            truckMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
-
-            // Update popup content
-            truckMarkers[truck.id].setPopupContent(`
-                <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
-                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong><br>
-                    <span style="color:#666;font-size:12px">Driver: ${truck.driver || 'Unknown'}</span><br>
-                    <span style="color:#059669;font-size:12px;font-weight:600">📍 Live tracking</span>
-                </div>
-            `);
-        } else {
-            // Create new marker
-            const icon = createTruckIcon();
-            const marker = L.marker([truck.lat, truck.lng], { icon }).addTo(managerMap);
-            marker.bindPopup(`
-                <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
-                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong><br>
-                    <span style="color:#666;font-size:12px">Driver: ${truck.driver || 'Unknown'}</span><br>
-                    <span style="color:#059669;font-size:12px;font-weight:600">📍 Live tracking</span>
-                </div>
-            `);
-            truckMarkers[truck.id] = marker;
-        }
-    });
 }
 
 // ─── Live Map (Leaflet — FREE) ──────────────────────────────────────────
@@ -236,8 +305,8 @@ async function initLiveMap() {
         attributionControl: false
     });
 
-    L.tileLayer(DARK_TILE_URL, {
-        attribution: DARK_TILE_ATTRIBUTION,
+    L.tileLayer(STANDARD_TILE_URL, {
+        attribution: STANDARD_TILE_ATTRIBUTION,
         maxZoom: 19
     }).addTo(managerMap);
 
@@ -256,9 +325,9 @@ async function initLiveMap() {
     // 500m geofence circle around primary site
     L.circle([selectedSite.lat, selectedSite.lng], {
         radius: 500,
-        color: '#3b82f6',
-        fillColor: '#3b82f6',
-        fillOpacity: 0.08,
+        color: '#7A8C3E',
+        fillColor: '#7A8C3E',
+        fillOpacity: 0.1,
         weight: 1,
         dashArray: '6, 4'
     }).addTo(managerMap);
@@ -266,58 +335,79 @@ async function initLiveMap() {
     setTimeout(() => managerMap.invalidateSize(), 200);
 }
 
-// ─── Load Approved Drivers for Booking Dropdown ─────────────────────────
-async function loadApprovedDrivers() {
-    const driverSelect = document.getElementById('bm-driver');
-    const driverHint = document.getElementById('bm-driver-hint');
-    const truckInput = document.getElementById('bm-truck-id');
-    if (!driverSelect) return;
+/**
+ * Initialize a mini-map inside the booking modal for custom point pinning.
+ */
+async function initMiniMap() {
+    const miniMapContainer = document.getElementById('bm-mini-map');
+    if (!miniMapContainer || miniMap) return;
 
-    // Show loading state
-    driverSelect.innerHTML = '<option value="" disabled selected>Loading drivers...</option>';
-    if (truckInput) { truckInput.value = ''; truckInput.placeholder = 'Select a driver above'; }
+    miniMapContainer.classList.remove('hidden');
 
-    try {
-        approvedDriversCache = await getApprovedDrivers();
-    } catch (e) {
-        approvedDriversCache = [];
-    }
-
-    if (approvedDriversCache.length === 0) {
-        driverSelect.innerHTML = `
-            <option value="" disabled selected>No approved drivers yet</option>
-        `;
-        if (driverHint) {
-            driverHint.classList.remove('hidden');
-            driverHint.textContent = 'Drivers must register and be approved by admin first';
-        }
-    } else {
-        driverSelect.innerHTML = `
-            <option value="" disabled selected>Select a driver</option>
-            ${approvedDriversCache.map(d => `
-                <option value="${d.name || d.email}"
-                        data-uid="${d.uid}"
-                        data-email="${d.email}"
-                        data-license="${d.truckLicense || ''}">
-                    ${d.name || 'Unnamed'} · ${d.truckLicense || 'No license'}
-                </option>
-            `).join('')}
-        `;
-        if (driverHint) {
-            driverHint.classList.remove('hidden');
-            driverHint.textContent = `${approvedDriversCache.length} approved driver${approvedDriversCache.length > 1 ? 's' : ''} available`;
-        }
-    }
-
-    // Auto-fill truck license when driver is selected
-    driverSelect.addEventListener('change', () => {
-        const selectedOpt = driverSelect.options[driverSelect.selectedIndex];
-        const license = selectedOpt?.dataset?.license || '';
-        if (truckInput) {
-            truckInput.value = license;
-            truckInput.placeholder = license ? '' : 'No license on file';
-        }
+    miniMap = L.map(miniMapContainer, {
+        center: [selectedSite.lat, selectedSite.lng],
+        zoom: 13,
+        zoomControl: false,
+        attributionControl: false
     });
+
+    L.tileLayer(DARK_TILE_URL, {
+        attribution: DARK_TILE_ATTRIBUTION,
+        maxZoom: 19
+    }).addTo(miniMap);
+
+    // Initial Marker
+    miniMapMarker = L.marker([selectedSite.lat, selectedSite.lng], {
+        draggable: true,
+        icon: L.divIcon({
+            className: 'pinned-location',
+            html: `<div style="width:20px;height:20px;background:#10b981;border:3px solid #fff;border-radius:50%;box-shadow:0 0 15px rgba(16,185,129,0.5)" class="animate-bounce"></div>`,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        })
+    }).addTo(miniMap);
+
+    // Update coordinates when marker is dragged
+    miniMapMarker.on('dragend', () => {
+        const pos = miniMapMarker.getLatLng();
+        updatePinnedLocation(pos.lat, pos.lng);
+    });
+
+    // Handle map clicks to move marker
+    miniMap.on('click', (e) => {
+        miniMapMarker.setLatLng(e.latlng);
+        updatePinnedLocation(e.latlng.lat, e.latlng.lng);
+    });
+}
+
+async function updatePinnedLocation(lat, lng) {
+    const latInput = document.getElementById('bm-lat');
+    const lngInput = document.getElementById('bm-lng');
+    const pinCoords = document.getElementById('bm-pin-coords');
+    const pinStatus = document.getElementById('bm-pin-status');
+    const addressInput = document.getElementById('bm-address');
+
+    if (latInput) latInput.value = lat.toFixed(6);
+    if (lngInput) lngInput.value = lng.toFixed(6);
+    if (pinCoords) pinCoords.textContent = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    if (pinStatus) pinStatus.classList.remove('hidden');
+
+    // Auto-fetch human readable address (Reverse Geocoding)
+    if (addressInput) {
+        addressInput.placeholder = "Determining delivery address...";
+        try {
+            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`);
+            if (!res.ok) throw new Error('Geocoding failed');
+            const data = await res.json();
+            
+            if (data && data.display_name) {
+                addressInput.value = data.display_name;
+            }
+        } catch (e) {
+            console.warn('Reverse geocoding failed:', e);
+            addressInput.placeholder = "Could not fetch address. Please type manually.";
+        }
+    }
 }
 
 // ─── Booking Modal ──────────────────────────────────────────────────────
@@ -342,19 +432,67 @@ function bindBookingEvents() {
         ).join('');
     }
 
-    openBtn.addEventListener('click', async () => {
+    openBtn.addEventListener('click', () => {
         modal.classList.remove('hidden');
         modal.classList.add('flex');
         clearConflictUI();
         if (statusEl) { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
-        // Refresh driver list each time modal opens
-        await loadApprovedDrivers();
+    });
+
+    // Pin on Map Button (Now triggers/refreshes the mini-map)
+    const pinBtn = document.getElementById('bm-pin-btn');
+    if (pinBtn) {
+        pinBtn.addEventListener('click', () => {
+            initMiniMap().then(() => {
+                if (miniMap) {
+                    miniMap.invalidateSize();
+                    // Center on current site if not pinned yet
+                    if (!document.getElementById('bm-lat').value) {
+                         miniMap.setView([selectedSite.lat, selectedSite.lng], 13);
+                         miniMapMarker.setLatLng([selectedSite.lat, selectedSite.lng]);
+                         updatePinnedLocation(selectedSite.lat, selectedSite.lng);
+                    }
+                }
+            });
+            pinBtn.classList.add('hidden'); // Hide the button once map is shown
+        });
+    }
+
+    // Modal Mode Switching
+    document.querySelectorAll('.location-mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const mode = btn.dataset.mode;
+            const modeInput = document.getElementById('bm-location-mode');
+            if (modeInput) modeInput.value = mode;
+            
+            // UI styles
+            document.querySelectorAll('.location-mode-btn').forEach(b => {
+                b.classList.remove('border-blue-500', 'bg-blue-500/10', 'text-white');
+                b.classList.add('border-white/5', 'bg-slate-800/40', 'text-slate-400');
+            });
+            btn.classList.add('border-blue-500', 'bg-blue-500/10', 'text-white');
+            btn.classList.remove('border-white/5', 'bg-slate-800/40', 'text-slate-400');
+
+            // Toggle containers
+            const siteCont = document.getElementById('site-selector-container');
+            const customCont = document.getElementById('custom-location-container');
+            if (mode === 'site') {
+                siteCont?.classList.remove('hidden');
+                customCont?.classList.add('hidden');
+            } else {
+                siteCont?.classList.add('hidden');
+                customCont?.classList.remove('hidden');
+                // Auto-init map if custom point selected
+                if (!miniMap) pinBtn?.click();
+            }
+        });
     });
 
     cancelBtn.addEventListener('click', () => {
         modal.classList.add('hidden');
         modal.classList.remove('flex');
         clearConflictUI();
+        cleanupBookingModal();
     });
 
     modal.addEventListener('click', (e) => {
@@ -362,26 +500,44 @@ function bindBookingEvents() {
             modal.classList.add('hidden');
             modal.classList.remove('flex');
             clearConflictUI();
+            cleanupBookingModal();
         }
     });
 
     confirmBtn.addEventListener('click', async () => {
-        const truckId = document.getElementById('bm-truck-id').value.trim();
-        const driverSelect = document.getElementById('bm-driver');
-        const driver = driverSelect?.value || '';
+        const modeInput = document.getElementById('bm-location-mode');
+        const mode = modeInput ? modeInput.value : 'site';
         const date = dateInput.value;
         const time = document.getElementById('bm-time').value;
-        const siteOpt = siteSelect.options[siteSelect.selectedIndex];
-        const targetSite = siteOpt.value;
-        const road = siteOpt.dataset.road;
+        const material = document.getElementById('bm-material').value;
 
-        if (!truckId || !date || !time) {
-            showBookingStatus('Please fill in all required fields.', 'error');
-            return;
+        let bookingData = { date, time, material };
+
+        if (mode === 'site') {
+            const siteOpt = siteSelect.options[siteSelect.selectedIndex];
+            const targetSite = siteOpt.value;
+            const road = siteOpt.dataset.road;
+            const site = DEMO_SITES.find(s => s.id === targetSite);
+            
+            bookingData.targetSite = site.name;
+            bookingData.road = road;
+        } else {
+            const address = document.getElementById('bm-address').value;
+            const lat = parseFloat(document.getElementById('bm-lat').value);
+            const lng = parseFloat(document.getElementById('bm-lng').value);
+
+            if (!address) { alert('Please enter delivery address'); return; }
+            if (isNaN(lat)) { alert('Please pin the location on the map'); return; }
+
+            bookingData.targetSite = '(Custom Location)';
+            bookingData.customAddress = address;
+            bookingData.road = 'Public Road'; // Generic road for custom points
+            bookingData.customLat = lat;
+            bookingData.customLng = lng;
         }
 
-        if (!driver) {
-            showBookingStatus('Please assign an approved driver.', 'error');
+        if (!date || !time) {
+            showBookingStatus('Please fill in all required fields.', 'error');
             return;
         }
 
@@ -389,7 +545,7 @@ function bindBookingEvents() {
         confirmBtn.innerHTML = '<span class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>';
         clearConflictUI();
 
-        const result = await bookDeliverySlot({ truckId, targetSite, road, date, time, driver });
+        const result = await bookDeliverySlot(bookingData);
 
         confirmBtn.disabled = false;
         confirmBtn.innerHTML = 'Confirm Slot';
@@ -401,10 +557,17 @@ function bindBookingEvents() {
                 modal.classList.add('hidden');
                 modal.classList.remove('flex');
                 clearConflictUI();
+                // Optionally keep miniMap or destroy? Let's keep for next time but reset inputs
+                document.getElementById('bm-lat').value = '';
+                document.getElementById('bm-lng').value = '';
+                document.getElementById('bm-pin-status')?.classList.add('hidden');
+                pinBtn?.classList.remove('hidden');
+                document.getElementById('bm-mini-map')?.classList.add('hidden');
+                if (miniMap) { miniMap.remove(); miniMap = null; }
             }, 1200);
         } else if (result.status === 'conflict' && result.suggestedTimeRaw) {
             // ── CONFLICT WITH SUGGESTION — render conflict prompt ────
-            pendingBooking = { truckId, targetSite, road, date, time: result.suggestedTimeRaw, driver };
+            pendingBooking = { ...bookingData, time: result.suggestedTimeRaw };
             renderConflictSuggestion(result);
         } else if (result.status === 'full') {
             // ── ALL SLOTS FULL — no suggestion possible ─────────────
@@ -541,4 +704,19 @@ function showBookingStatus(message, type) {
         'bg-red-500/10 text-red-400 border border-red-500/20'
     }`;
     el.textContent = message;
+}
+
+/**
+ * Resets the booking modal's mini-map and inputs.
+ */
+function cleanupBookingModal() {
+    document.getElementById('bm-lat').value = '';
+    document.getElementById('bm-lng').value = '';
+    document.getElementById('bm-pin-status')?.classList.add('hidden');
+    document.getElementById('bm-pin-btn')?.classList.remove('hidden');
+    document.getElementById('bm-mini-map')?.classList.add('hidden');
+    if (miniMap) {
+        miniMap.remove();
+        miniMap = null;
+    }
 }

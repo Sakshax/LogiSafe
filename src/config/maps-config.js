@@ -96,21 +96,20 @@ export function createSiteIcon() {
     if (!window.L) return null;
     return L.divIcon({
         className: 'custom-site-marker',
-        html: `<div style="width:20px;height:20px;background:#3b82f6;border:3px solid #fff;border-radius:50%;box-shadow:0 0 10px rgba(59,130,246,0.5)"></div>`,
+        html: `<div style="width:20px;height:20px;background:#7A8C3E;border:3px solid #fff;border-radius:50%;box-shadow:0 0 10px rgba(122,140,62,0.3)"></div>`,
         iconSize: [20, 20],
         iconAnchor: [10, 10],
         popupAnchor: [0, -12]
     });
 }
 
-/**
- * Create a styled truck marker icon
- */
 export function createTruckIcon() {
     if (!window.L) return null;
     return L.divIcon({
         className: 'custom-truck-marker',
-        html: `<div style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.5))">🚛</div>`,
+        html: `<div style="width:32px;height:32px;background:#1C1C1C;border:2px solid #7A8C3E;border-radius:6px;display:flex;items-center;justify-content:center;box-shadow:0 4px 8px rgba(0,0,0,0.2)">
+                 <span style="font-size:18px">🚛</span>
+               </div>`,
         iconSize: [32, 32],
         iconAnchor: [16, 16],
         popupAnchor: [0, -18]

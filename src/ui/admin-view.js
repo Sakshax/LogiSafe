@@ -8,12 +8,14 @@
  *  TAB 4: Live Alerts + Compliance Records from Firestore
  */
 
-import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, MIRA_BHAYANDAR_CENTER, DEMO_SITES } from '../config/maps-config.js';
-import { getBookings, cancelBooking } from '../modules/scheduler.js';
+import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, MIRA_BHAYANDAR_CENTER, DEMO_SITES, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION } from '../config/maps-config.js';
+import { getBookings, cancelBooking, assignDriverAndSendLink } from '../modules/scheduler.js';
 import {
     getPendingDrivers, approveDriver, rejectDriver,
     getAllDrivers, getAllManagers, updateUserStatus
 } from '../modules/auth.js';
+import { listenToActiveTrucks } from '../modules/tracking.js';
+import { createTruckIcon } from '../config/maps-config.js';
 import {
     db, collection, getDocs, query, where, orderBy, onSnapshot, deleteDoc, doc
 } from '../config/firebase-config.js';
@@ -22,6 +24,8 @@ import { timeAgo, todayISO, to12Hour } from '../utils/formatters.js';
 let adminMap = null;
 let initialized = false;
 let unsubscribeListeners = [];
+let truckMarkers = {}; // Realtime truck markers
+let truckPaths = {}; // Store routing polylines
 
 // ─── Audit Log State ────────────────────────────────────────────────────
 const flaggedLogs = new Set();
@@ -54,6 +58,7 @@ export function destroyAdminView() {
     if (adminMap) { adminMap.remove(); adminMap = null; }
     unsubscribeListeners.forEach(fn => fn());
     unsubscribeListeners = [];
+    truckMarkers = {};
     initialized = false;
 }
 
@@ -77,13 +82,13 @@ function bindAdminTabs() {
 function switchAdminTab(tab) {
     // Update tab buttons
     document.querySelectorAll('.admin-tab').forEach(t => {
-        t.classList.remove('bg-blue-600', 'text-white', 'shadow-lg');
-        t.classList.add('text-slate-400');
+        t.classList.remove('active', 'border-b-2', 'border-[#7A8C3E]', 'text-[#1C1C1C]');
+        t.classList.add('text-[#64748B]');
     });
     const activeTab = document.querySelector(`.admin-tab[data-tab="${tab}"]`);
     if (activeTab) {
-        activeTab.classList.add('bg-blue-600', 'text-white', 'shadow-lg');
-        activeTab.classList.remove('text-slate-400');
+        activeTab.classList.add('active', 'border-b-2', 'border-[#7A8C3E]', 'text-[#1C1C1C]');
+        activeTab.classList.remove('text-[#64748B]');
     }
 
     // Show/hide content
@@ -118,22 +123,22 @@ function renderStats() {
     const violationCount = DEMO_AUDIT_LOG.filter(l => l.severity === 'critical').length;
 
     const stats = [
-        { label: 'Active Sites', value: DEMO_SITES.length, icon: '🏗️', color: 'from-blue-500/20 to-blue-600/5', text: 'text-blue-400' },
-        { label: "Today's Deliveries", value: bookings.length, icon: '🚛', color: 'from-emerald-500/20 to-emerald-600/5', text: 'text-emerald-400' },
-        { label: 'Compliance Rate', value: '94%', icon: '✅', color: 'from-amber-500/20 to-amber-600/5', text: 'text-amber-400' },
-        { label: 'Violations Today', value: violationCount, icon: '🚨', color: 'from-red-500/20 to-red-600/5', text: 'text-red-400' },
+        { label: 'Active Sites', value: DEMO_SITES.length, icon: '🏗️', color: 'bg-[#F8FAFC]' },
+        { label: "Today's Deliveries", value: bookings.length, icon: '🚛', color: 'bg-[#F8FAFC]' },
+        { label: 'Compliance Rate', value: '94%', icon: '✅', color: 'bg-[#F8FAFC]' },
+        { label: 'Violations Today', value: violationCount, icon: '🚨', color: 'bg-[#E05535]/10' },
     ];
 
     el.innerHTML = stats.map(s => `
-        <div class="stat-card bg-slate-800/60 border border-white/5 rounded-2xl p-5 backdrop-blur-sm hover:border-white/10 transition-all duration-300">
-            <div class="flex items-center justify-between mb-3">
-                <span class="text-2xl">${s.icon}</span>
-                <div class="w-10 h-10 rounded-xl bg-gradient-to-br ${s.color} flex items-center justify-center">
-                    <span class="${s.text} text-lg font-bold">${typeof s.value === 'number' ? s.value : ''}</span>
-                </div>
+        <div class="dash-card p-6 flex flex-col justify-between">
+            <div class="flex items-center justify-between mb-4">
+                <span class="text-xl">${s.icon}</span>
+                <span class="ui-label text-[#64748B]">/ Global</span>
             </div>
-            <p class="text-2xl font-bold text-white">${s.value}</p>
-            <p class="text-sm text-slate-400 mt-1">${s.label}</p>
+            <div>
+                <p class="text-4xl font-extrabold text-[#1C1C1C]">${s.value}</p>
+                <p class="ui-label mt-2 text-[#7A8C3E]">${s.label}</p>
+            </div>
         </div>
     `).join('');
 }
@@ -162,16 +167,16 @@ async function loadPendingDrivers() {
     container.innerHTML = drivers.map((d, i) => {
         const regDate = d.registeredAt?.toDate ? d.registeredAt.toDate().toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
         return `
-        <div id="pending-${d.uid}" class="flex items-center gap-4 p-4 rounded-xl border border-amber-500/10 bg-amber-500/5 transition-all duration-300">
-            <div class="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-600/10 flex items-center justify-center border border-amber-500/20"><span class="text-lg">🚛</span></div>
+        <div id="pending-${d.uid}" class="flex items-center gap-6 p-6 border border-[#1C1C1C]/10 bg-white transition-all duration-300">
+            <div class="flex-shrink-0 w-12 h-12 rounded-full bg-[#F8FAFC] flex items-center justify-center border border-[#1C1C1C]/10"><span class="text-xl">🚛</span></div>
             <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${d.name || 'Unnamed'}</p>
-                <p class="text-xs text-slate-400 mt-0.5">${d.email} · <span class="text-amber-400 font-mono">${d.truckLicense || '—'}</span></p>
-                <p class="text-[10px] text-slate-500 mt-1">${regDate}</p>
+                <p class="ui-label text-[#7A8C3E] mb-1">/ Driver Approval Required</p>
+                <p class="font-bold text-[#1C1C1C] text-lg uppercase tracking-tight">${d.name || 'Unnamed'}</p>
+                <p class="text-xs text-[#64748B] mt-1">${d.email} · <span class="text-[#E05535] font-bold">${d.truckLicense || '—'}</span></p>
             </div>
-            <div class="flex items-center gap-2 flex-shrink-0">
-                <button class="approve-driver-btn flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600/20 border border-emerald-500/20 text-emerald-400 text-xs font-semibold hover:bg-emerald-600/40 transition-all active:scale-95" data-uid="${d.uid}" data-name="${d.name}">✓ Approve</button>
-                <button class="reject-driver-btn flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-600/10 border border-red-500/20 text-red-400 text-xs font-semibold hover:bg-red-600/30 transition-all active:scale-95" data-uid="${d.uid}" data-name="${d.name}">✕ Reject</button>
+            <div class="flex items-center gap-4 flex-shrink-0">
+                <button class="approve-driver-btn btn-primary px-6 py-3 text-[10px]" data-uid="${d.uid}" data-name="${d.name}">Approve</button>
+                <button class="reject-driver-btn border border-[#1C1C1C]/10 px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-[#E05535] hover:bg-[#E05535]/5" data-uid="${d.uid}" data-name="${d.name}">Reject</button>
             </div>
         </div>`;
     }).join('');
@@ -322,16 +327,16 @@ async function loadAllManagers() {
     container.innerHTML = managers.map(m => {
         const regDate = m.registeredAt?.toDate ? m.registeredAt.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
         return `
-        <div class="flex items-center gap-4 p-3 rounded-xl border border-blue-500/20 bg-blue-500/5 transition-all duration-200 hover:border-white/10">
-            <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-500/15 to-blue-600/5 flex items-center justify-center flex-shrink-0">
+        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
+            <div class="w-10 h-10 rounded-full bg-[#F8FAFC] flex items-center justify-center flex-shrink-0 border border-[#1C1C1C]/10">
                 <span class="text-sm">📋</span>
             </div>
             <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${m.name || 'Unnamed'}</p>
-                <p class="text-[11px] text-slate-400 mt-0.5">${m.email} · Registered ${regDate}</p>
+                <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${m.name || 'Unnamed'}</p>
+                <p class="text-[10px] text-[#64748B] font-medium uppercase tracking-wider mt-1">${m.email} · Registered ${regDate}</p>
             </div>
-            <span class="px-2 py-1 rounded-md text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">✓ Active</span>
-            <button class="user-action-btn px-2 py-1 rounded-md bg-red-600/10 text-red-400 text-[10px] font-semibold hover:bg-red-600/30 transition-all" data-uid="${m.uid}" data-action="suspended" title="Suspend">🚫</button>
+            <span class="ui-label text-[#7A8C3E]">Active</span>
+            <button class="user-action-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all" data-uid="${m.uid}" data-action="suspended" title="Suspend">✕</button>
         </div>`;
     }).join('');
 
@@ -373,10 +378,11 @@ async function loadAllBookings() {
     }
 
     const statusConfig = {
-        'SCHEDULED': { text: 'text-blue-400', bg: 'bg-blue-500/5', border: 'border-blue-500/15', dot: 'bg-blue-400' },
-        'EN_ROUTE':  { text: 'text-amber-400', bg: 'bg-amber-500/5', border: 'border-amber-500/15', dot: 'bg-amber-400' },
-        'ARRIVED':   { text: 'text-emerald-400', bg: 'bg-emerald-500/5', border: 'border-emerald-500/15', dot: 'bg-emerald-400' },
-        'COMPLETED': { text: 'text-slate-400', bg: 'bg-slate-500/5', border: 'border-slate-500/15', dot: 'bg-slate-400' },
+        'PENDING_ADMIN': { text: 'text-[#E05535]', bg: 'bg-[#E05535]/5', border: 'border-[#E05535]/10', dot: 'bg-[#E05535]' },
+        'SCHEDULED': { text: 'text-[#7A8C3E]', bg: 'bg-[#7A8C3E]/5', border: 'border-[#7A8C3E]/10', dot: 'bg-[#7A8C3E]' },
+        'EN_ROUTE':  { text: 'text-[#F4A623]', bg: 'bg-[#F4A623]/5', border: 'border-[#F4A623]/10', dot: 'bg-[#F4A623]' },
+        'ARRIVED':   { text: 'text-[#1C1C1C]', bg: 'bg-[#1C1C1C]/5', border: 'border-[#1C1C1C]/10', dot: 'bg-[#1C1C1C]' },
+        'COMPLETED': { text: 'text-[#64748B]', bg: 'bg-[#64748B]/5', border: 'border-[#64748B]/10', dot: 'bg-[#64748B]' },
     };
 
     container.innerHTML = bookings.map(b => {
@@ -384,22 +390,30 @@ async function loadAllBookings() {
         const dateStr = b.date || '—';
         const timeStr = b.time ? to12Hour(b.time) : '—';
         return `
-        <div class="flex items-center gap-4 p-3 rounded-xl border ${sc.border} ${sc.bg} transition-all duration-200 hover:border-white/10">
-            <div class="w-14 text-center flex-shrink-0">
-                <p class="text-sm font-bold text-white">${timeStr.split(' ')[0] || ''}</p>
-                <p class="text-[10px] ${sc.text}">${timeStr.split(' ')[1] || ''}</p>
+        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
+            <div class="w-16 text-center border-r border-[#1C1C1C]/10 pr-6 flex-shrink-0">
+                <p class="text-[10px] font-extrabold text-[#1C1C1C]">${timeStr.split(' ')[0] || ''}</p>
+                <p class="text-[9px] font-bold text-[#64748B] uppercase">${timeStr.split(' ')[1] || ''}</p>
             </div>
-            <div class="w-px h-10 bg-white/5"></div>
             <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${b.truckId || '—'}</p>
-                <p class="text-[11px] text-slate-400 mt-0.5">${b.driver || 'Unassigned'} · ${b.road || '—'} · ${dateStr}</p>
+                <p class="ui-label text-[#7A8C3E] mb-1">/ Booking Confirmed</p>
+                <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${b.truckId || 'UNASSIGNED'}</p>
+                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${b.road || 'Unknown Site'} · ${dateStr}</p>
+                ${b.material ? `
+                    <div class="mt-2 flex items-center gap-2">
+                        <span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>
+                    </div>
+                ` : ''}
             </div>
-            <div class="flex items-center gap-2 flex-shrink-0">
-                <span class="w-2 h-2 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
-                <span class="text-[10px] font-medium ${sc.text}">${b.status || '—'}</span>
+            <div class="flex items-center gap-3 flex-shrink-0 h-full">
+                <span class="w-1.5 h-1.5 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
+                <span class="ui-label ${sc.text}">${b.status || '—'}</span>
             </div>
+            ${b.status === 'PENDING_ADMIN' && b.firestoreId ? `
+                <button class="send-link-btn btn-primary px-4 py-2 text-[9px]" data-id="${b.firestoreId}">Assign Driver</button>
+            ` : ''}
             ${b.firestoreId ? `
-                <button class="cancel-booking-btn px-2 py-1 rounded-md bg-red-600/10 text-red-400 text-[10px] font-semibold hover:bg-red-600/30 transition-all" data-id="${b.firestoreId}" title="Cancel booking">✕</button>
+                <button class="cancel-booking-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all ml-4" data-id="${b.firestoreId}" title="Cancel booking">✕</button>
             ` : ''}
         </div>`;
     }).join('');
@@ -416,6 +430,30 @@ async function loadAllBookings() {
             await loadAllBookings();
         });
     });
+
+    container.querySelectorAll('.send-link-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            btn.disabled = true; btn.textContent = 'Sending...';
+            // Mock driver assignment
+            const mockDriver = "Nearest Available Driver";
+            const mockTruck = "MH-04-AB-1234";
+
+            const trackingToken = await assignDriverAndSendLink(btn.dataset.id, mockDriver, mockTruck);
+            
+            const link = `${window.location.origin}${window.location.pathname}?track_token=${trackingToken}`;
+            const driverPhone = "919766802047"; // Placeholder for real production number
+            const message = encodeURIComponent(`Hi ${mockDriver},\n\nYou have been assigned a new construction delivery trip.\nTrack here: ${link}`);
+            
+            // Production WhatsApp Integration: wa.me
+            const waUrl = `https://wa.me/${driverPhone}?text=${message}`;
+            
+            if (confirm(`Assignment ready for ${mockDriver}.\n\nOpen WhatsApp to send tracking link?`)) {
+                window.open(waUrl, '_blank');
+            }
+            
+            await loadAllBookings();
+        });
+    });
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -426,40 +464,47 @@ function loadLiveAlerts() {
     const container = document.getElementById('admin-live-alerts');
     if (!container) return;
 
-    // Try real-time Firestore listener for active trucks
     try {
-        const unsub = onSnapshot(collection(db, 'activeTrucks'), (snapshot) => {
-            const trucks = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-            const liveEntries = trucks.map(t => ({
-                icon: '📍', title: `Truck Active: ${t.driverId || t.id}`,
-                detail: `Lat: ${t.lat?.toFixed(4) || '—'}, Lng: ${t.lng?.toFixed(4) || '—'}`,
-                time: t.updatedAt?.toDate ? t.updatedAt.toDate() : new Date(),
-                severity: 'info'
+        const unsub = onSnapshot(collection(db, 'live_alerts'), (snapshot) => {
+            const alerts = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+            // sort manually if query isn't strictly ordered
+            alerts.sort((a,b) => (b.time?.toMillis?.() || 0) - (a.time?.toMillis?.() || 0));
+
+            const liveEntries = alerts.map(a => ({
+                icon: a.type === 'geofence_entry' ? '🚨' : '📍',
+                title: a.title || 'Alert',
+                detail: a.detail || '',
+                time: a.time?.toDate ? a.time.toDate() : new Date(),
+                severity: a.severity || 'info'
             }));
 
-            // Combine with demo entries
             const all = [...liveEntries, ...DEMO_AUDIT_LOG].slice(0, 20);
             renderLiveAlertsList(container, all);
         });
         unsubscribeListeners.push(unsub);
     } catch (e) {
-        // Fallback to demo data
         renderLiveAlertsList(container, DEMO_AUDIT_LOG);
     }
 }
 
 function renderLiveAlertsList(container, entries) {
-    const styles = { critical: 'border-l-red-500 bg-red-500/5', warning: 'border-l-amber-500 bg-amber-500/5', success: 'border-l-emerald-500 bg-emerald-500/5', info: 'border-l-blue-500 bg-blue-500/5' };
-    const textStyles = { critical: 'text-red-400', warning: 'text-amber-400', success: 'text-emerald-400', info: 'text-blue-400' };
+    const styles = { 
+        critical: 'border-l-[#E05535] bg-[#E05535]/5', 
+        warning: 'border-l-[#F4A623] bg-[#F4A623]/5', 
+        success: 'border-l-[#7A8C3E] bg-[#7A8C3E]/5', 
+        info: 'border-l-[#1C1C1C] bg-[#F8FAFC]' 
+    };
+    const textStyles = { critical: 'text-[#E05535]', warning: 'text-[#F4A623]', success: 'text-[#7A8C3E]', info: 'text-[#1C1C1C]' };
 
     container.innerHTML = entries.map((e, i) => `
-        <div class="border-l-4 ${styles[e.severity] || styles.info} rounded-r-xl p-3 transition-all duration-300 hover:translate-x-1" style="animation-delay:${i*50}ms">
+        <div class="border-l-4 ${styles[e.severity] || styles.info} p-3 transition-all duration-300 hover:translate-x-1" style="animation-delay:${i*50}ms">
             <div class="flex items-start gap-3">
-                <span class="text-base mt-0.5 flex-shrink-0">${e.icon}</span>
+                <span class="text-base mt-1 flex-shrink-0">${e.icon}</span>
                 <div class="flex-1 min-w-0">
-                    <p class="font-semibold ${textStyles[e.severity] || textStyles.info} text-xs">${e.title}</p>
-                    <p class="text-slate-300 text-xs mt-1">${e.detail}</p>
-                    <p class="text-slate-500 text-[10px] mt-1">${timeAgo(e.time)}</p>
+                    <p class="ui-label ${textStyles[e.severity] || textStyles.info} text-[10px] mb-1">/ Live Alert</p>
+                    <p class="font-bold text-[#1C1C1C] text-xs uppercase tracking-tight">${e.title}</p>
+                    <p class="text-[#64748B] text-xs mt-1 leading-relaxed">${e.detail}</p>
+                    <p class="text-[#64748B] text-[9px] mt-2 font-bold uppercase opacity-50">${timeAgo(e.time)}</p>
                 </div>
             </div>
         </div>
@@ -494,15 +539,16 @@ async function loadComplianceRecords() {
     container.innerHTML = records.map(r => {
         const uploadDate = r.uploadedAt?.toDate ? r.uploadedAt.toDate().toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
         return `
-        <div class="flex items-center gap-4 p-3 rounded-xl border border-emerald-500/15 bg-emerald-500/5 transition-all">
-            <div class="w-9 h-9 rounded-lg bg-emerald-500/15 flex items-center justify-center flex-shrink-0">
+        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all">
+            <div class="w-10 h-10 rounded-full bg-[#F8FAFC] flex items-center justify-center flex-shrink-0 border border-[#1C1C1C]/10">
                 <span class="text-sm">📸</span>
             </div>
             <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-xs truncate">Booking: ${r.bookingId || '—'}</p>
-                <p class="text-[10px] text-slate-400 mt-0.5">${uploadDate} · ${r.verified ? '✅ Verified' : '⏳ Pending'}</p>
+                <p class="ui-label text-[#7A8C3E] mb-1">/ Compliance Verification</p>
+                <p class="font-bold text-[#1C1C1C] text-xs uppercase tracking-tight">Booking: ${r.bookingId || '—'}</p>
+                <p class="text-[9px] text-[#64748B] font-bold uppercase mt-1">${uploadDate} · ${r.verified ? '✅ Verified' : '⏳ Pending'}</p>
             </div>
-            ${r.url ? `<a href="${r.url}" target="_blank" class="px-2 py-1 rounded-md bg-blue-600/15 text-blue-400 text-[10px] font-semibold hover:bg-blue-600/30 transition-all">View</a>` : ''}
+            ${r.url ? `<a href="${r.url}" target="_blank" class="px-4 py-2 border border-[#1C1C1C]/10 text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest hover:bg-[#F8FAFC] transition-all">View Photo</a>` : ''}
         </div>`;
     }).join('');
 }
@@ -521,7 +567,7 @@ async function initHeatmap() {
     }
 
     adminMap = L.map(mapContainer, { center: [MIRA_BHAYANDAR_CENTER.lat, MIRA_BHAYANDAR_CENTER.lng], zoom: 13, zoomControl: true, attributionControl: false });
-    L.tileLayer(DARK_TILE_URL, { attribution: DARK_TILE_ATTRIBUTION, maxZoom: 19 }).addTo(adminMap);
+    L.tileLayer(STANDARD_TILE_URL, { attribution: STANDARD_TILE_ATTRIBUTION, maxZoom: 19 }).addTo(adminMap);
 
     const heatData = [];
     DEMO_SITES.forEach(site => {
@@ -531,14 +577,107 @@ async function initHeatmap() {
     });
 
     if (window.L && L.heatLayer) {
-        L.heatLayer(heatData, { radius: 30, blur: 20, maxZoom: 17, gradient: { 0.2: '#2563eb', 0.4: '#7c3aed', 0.6: '#f59e0b', 0.8: '#ef4444', 1.0: '#dc2626' } }).addTo(adminMap);
+        L.heatLayer(heatData, { radius: 30, blur: 20, maxZoom: 17, gradient: { 0.2: '#7A8C3E', 0.5: '#F4A623', 0.8: '#E05535', 1.0: '#E05535' } }).addTo(adminMap);
     }
 
     DEMO_SITES.forEach(site => {
         L.marker([site.lat, site.lng], {
-            icon: L.divIcon({ className: '', html: `<div style="width:16px;height:16px;background:#3b82f6;border:3px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(59,130,246,0.6)"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] })
-        }).addTo(adminMap).bindPopup(`<div style="font-family:Inter,sans-serif;padding:4px"><strong style="font-size:13px">${site.name}</strong><br><span style="color:#666;font-size:12px">Road: ${site.road}</span><br><span style="color:#059669;font-size:12px;font-weight:600">Status: Active</span></div>`);
+            icon: L.divIcon({ className: '', html: `<div style="width:16px;height:16px;background:#7A8C3E;border:3px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(122,140,62,0.4)"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] })
+        }).addTo(adminMap).bindPopup(`<div style="font-family:'Inter',sans-serif;padding:4px"><strong style="font-size:13px">${site.name}</strong><br><span style="color:#64748B;font-size:12px">Road: ${site.road}</span><br><span style="color:#7A8C3E;font-size:12px;font-weight:700">STATUS: ACTIVE SITE</span></div>`);
     });
 
-    setTimeout(() => adminMap.invalidateSize(), 200);
+    setTimeout(() => {
+        adminMap.invalidateSize();
+        startRealtimeTruckTracking();
+    }, 200);
+}
+
+// ─── Realtime Truck Tracking for Admin ──────────────────────────────────
+
+function startRealtimeTruckTracking() {
+    if (!adminMap) return;
+
+    const unsub = listenToActiveTrucks((trucks) => {
+        reconcileTruckMarkers(trucks);
+    });
+    unsubscribeListeners.push(unsub);
+}
+
+function reconcileTruckMarkers(trucks) {
+    if (!adminMap) return;
+
+    const currentIds = new Set(trucks.map(t => t.id));
+
+    // Remove markers for trucks that are no longer active
+    for (const id of Object.keys(truckMarkers)) {
+        if (!currentIds.has(id)) {
+            adminMap.removeLayer(truckMarkers[id]);
+            delete truckMarkers[id];
+        }
+    }
+
+    // Add or update markers
+    trucks.forEach(truck => {
+        if (!truck.lat || !truck.lng) return;
+
+        const timeStr = truck.lastUpdate ? timeAgo(truck.lastUpdate) : 'Just now';
+
+        const popupContent = `
+            <div style="font-family:Inter,sans-serif;padding:6px;min-width:160px">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <strong style="font-size:13px">${truck.truckId || truck.id}</strong>
+                </div>
+                <div style="color:#666;font-size:11px;margin-bottom:4px">
+                    Driver: ${truck.driver || 'Unknown'}
+                </div>
+                <div style="display:flex;align-items:center;justify-content:between;border-top:1px solid #eee;padding-top:4px;margin-top:4px">
+                    <span style="color:#059669;font-size:11px;font-weight:600">LIVE TRACKING</span>
+                    <span style="color:#94a3b8;font-size:10px;margin-left:auto">${timeStr}</span>
+                </div>
+            </div>
+        `;
+
+        if (truckMarkers[truck.id]) {
+            truckMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
+            truckMarkers[truck.id].setPopupContent(popupContent);
+        } else {
+            const icon = createTruckIcon();
+            const marker = L.marker([truck.lat, truck.lng], { icon }).addTo(adminMap);
+            marker.bindPopup(popupContent);
+            truckMarkers[truck.id] = marker;
+        }
+
+        // Draw/Update routing path (polyline)
+        if (truck.destLat && truck.destLng) {
+            const pathPoints = [
+                [truck.lat, truck.lng],
+                [truck.destLat, truck.destLng]
+            ];
+            
+            if (truckPaths[truck.id]) {
+                truckPaths[truck.id].setLatLngs(pathPoints);
+            } else {
+                truckPaths[truck.id] = L.polyline(pathPoints, {
+                    color: '#8b5cf6', // Violet for Admin
+                    weight: 3,
+                    opacity: 0.5,
+                    dashArray: '8, 8'
+                }).addTo(adminMap);
+            }
+        }
+    });
+
+    // Cleanup markers and paths
+    for (const id of Object.keys(truckMarkers)) {
+        if (!currentIds.has(id)) {
+            adminMap.removeLayer(truckMarkers[id]);
+            delete truckMarkers[id];
+            
+            if (truckPaths[id]) {
+                adminMap.removeLayer(truckPaths[id]);
+                delete truckPaths[id];
+            }
+        }
+    }
 }
