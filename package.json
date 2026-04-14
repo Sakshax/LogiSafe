@@ -4,7 +4,7 @@
     "description": "LogiSafe — Smart Construction Logistics Platform for MBMC Mira-Bhayandar",
     "private": true,
     "scripts": {
-        "dev": "npx -y http-server . -p 3000 -c-1 --cors -o /public/index.html",
+        "dev": "npx -y http-server . -p 3000 -c-1 --cors -o /index.html",
         "serve": "npx -y http-server . -p 8080 -c-1 --cors",
         "deploy": "firebase deploy --only hosting"
     },
