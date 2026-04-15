@@ -1433,3 +1433,62 @@ select.auth-input {
     background-position: right 0.75rem center;
     padding-right: 2.5rem;
 }
+
+/* ── UI Utilities ─────────────────────────────────────────────────── */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ── Mobile Layout Tweaks ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+    #admin-view, #manager-view {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+
+    .modal-card {
+        padding: 1.5rem !important;
+        border-radius: 1.5rem !important;
+    }
+
+    .heading-lg {
+        font-size: 24px;
+    }
+
+    .display-lg {
+        font-size: 32px;
+    }
+
+    .dash-card {
+        padding: 1rem !important;
+    }
+
+    #admin-stats {
+        gap: 1rem;
+    }
+}
+
+/* ── Admin Tab Styling ────────────────────────────────────────────── */
+.admin-tab {
+    position: relative;
+    transition: all 0.2s ease;
+}
+
+.admin-tab::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--color-primary);
+    transform: scaleX(0);
+    transition: transform 0.2s ease;
+}
+
+.admin-tab.active::after {
+    transform: scaleX(1);
+}
+
+.admin-tab:hover {
+    color: var(--color-text) !important;
+}

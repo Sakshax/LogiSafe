@@ -351,19 +351,40 @@ async function initMiniMap() {
         attributionControl: false
     });
 
-    L.tileLayer(DARK_TILE_URL, {
-        attribution: DARK_TILE_ATTRIBUTION,
+    // Use STANDARD_TILE_URL for "Colourful" look
+    L.tileLayer(STANDARD_TILE_URL, {
+        attribution: STANDARD_TILE_ATTRIBUTION,
         maxZoom: 19
     }).addTo(miniMap);
 
-    // Initial Marker
+    // Add Heatmap Layer (same logic as Admin Portal)
+    const heatData = [];
+    DEMO_SITES.forEach(site => {
+        // Generate pseudo-random density for visual impact
+        for (let i = 0; i < 8; i++) {
+            heatData.push([site.lat + (Math.random() - 0.5) * 0.012, site.lng + (Math.random() - 0.5) * 0.012, Math.random() * 0.8 + 0.3]);
+        }
+    });
+
+    if (window.L && L.heatLayer) {
+        L.heatLayer(heatData, { 
+            radius: 25, 
+            blur: 15, 
+            maxZoom: 17, 
+            gradient: { 0.2: '#7A8C3E', 0.5: '#F4A623', 0.8: '#E05535', 1.0: '#E05535' } 
+        }).addTo(miniMap);
+    }
+
+    // Initial Marker (Modern Rounded Pin)
     miniMapMarker = L.marker([selectedSite.lat, selectedSite.lng], {
         draggable: true,
         icon: L.divIcon({
             className: 'pinned-location',
-            html: `<div style="width:20px;height:20px;background:#10b981;border:3px solid #fff;border-radius:50%;box-shadow:0 0 15px rgba(16,185,129,0.5)" class="animate-bounce"></div>`,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10]
+            html: `<div style="width:24px;height:24px;background:#E05535;border:4px solid #fff;border-radius:50%;box-shadow:0 0 20px rgba(224,85,53,0.5);display:flex;align-items:center;justify-content:center;">
+                     <div style="width:4px;height:4px;background:#fff;border-radius:50%;"></div>
+                   </div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
         })
     }).addTo(miniMap);
 
@@ -467,11 +488,13 @@ function bindBookingEvents() {
             
             // UI styles
             document.querySelectorAll('.location-mode-btn').forEach(b => {
-                b.classList.remove('border-blue-500', 'bg-blue-500/10', 'text-white');
-                b.classList.add('border-white/5', 'bg-slate-800/40', 'text-slate-400');
+                b.style.border = '1px solid rgba(28,28,28,0.1)';
+                b.style.background = 'transparent';
+                b.style.color = '#64748B';
             });
-            btn.classList.add('border-blue-500', 'bg-blue-500/10', 'text-white');
-            btn.classList.remove('border-white/5', 'bg-slate-800/40', 'text-slate-400');
+            btn.style.border = '1px solid #7A8C3E';
+            btn.style.background = 'rgba(122,140,62,0.06)';
+            btn.style.color = '#1C1C1C';
 
             // Toggle containers
             const siteCont = document.getElementById('site-selector-container');
