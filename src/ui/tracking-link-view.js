@@ -1,52 +1,235 @@
 /**
- * driver-view.js — Zero-Install Mobile Driver Interface v2
+ * tracking-link-view.js — Zero-Install Mobile Driver Interface v4
  *
- * Features:
- *  - Large "Start Tracking" button with pulse animation
- *  - Real-time distance display with ETA
- *  - 500m geofence trigger unlocking compliance module
- *  - Camera/photo upload for dust mitigation proof
- *  - Delivery cannot be marked successful without verified photo
- *  - POST-DELIVERY: 3-second delay → auto-clears to "Trip Completed.
- *    Ready for Next Assignment" state (prevents dead-screen)
+ * Flow:
+ *  1. Driver opens temp tracking link → sees LOGIN form on the tracking page
+ *  2. Driver signs in with their registered driver account
+ *  3. After login → GPS auto-starts immediately + live map shows driver position
+ *  4. Real-time: driver moves → map updates → Firestore syncs → manager sees movement
+ *  5. Driver stops → nothing updates → manager map truck stays still
+ *  6. 500m geofence → compliance photo unlock
+ *  7. Photo upload → delivery complete → link expired
  */
 
 import { startTracking, stopTracking, isTrackingActive, setDestination, getGeofenceRadius } from '../modules/tracking.js';
 import { uploadCompliancePhoto, simulateUpload } from '../modules/compliance.js';
 import { DEMO_SITES } from '../config/maps-config.js';
+import { initMaps, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION, createTruckIcon, createSiteIcon } from '../config/maps-config.js';
 
 let initialized = false;
 let trackingActive = false;
 let complianceUnlocked = false;
 let tripCompleted = false;
 let latestDistanceKm = 999;
+let trackToken = null;
+
+// Live map references
+let driverMap = null;
+let driverMarker = null;
+let destMarker = null;
+let routeLine = null;
 
 // DOM references
 let els = {};
 
 // Active trip info
 const currentTrip = {
-    driverId: 'driver-' + Date.now(),
+    driverId: null,
+    driverName: null,
     site: DEMO_SITES[0],
     bookingId: 'booking-demo-001'
 };
 
-export async function initTrackingLinkView(trackToken) {
+// Speed tracking
+let lastPositionTime = null;
+let lastSpeedKmh = 0;
+
+export async function initTrackingLinkView(token) {
     if (initialized) return;
     initialized = true;
     tripCompleted = false;
+    trackToken = token;
+
+    // Show the login gate, hide tracking UI
+    const loginGate = document.getElementById('tracking-login-gate');
+    const mainUI = document.getElementById('tracking-main-ui');
+    if (loginGate) loginGate.classList.remove('hidden');
+    if (mainUI) mainUI.classList.add('hidden');
+
+    // Bind login events
+    bindTrackingLogin();
+}
+
+export function destroyTrackingLinkView() {
+    if (trackingActive) {
+        stopTracking();
+        trackingActive = false;
+    }
+    if (driverMap) {
+        driverMap.remove();
+        driverMap = null;
+    }
+    driverMarker = null;
+    destMarker = null;
+    routeLine = null;
+    initialized = false;
+    complianceUnlocked = false;
+    tripCompleted = false;
+    trackToken = null;
+    currentTrip.driverId = null;
+    currentTrip.driverName = null;
+    lastPositionTime = null;
+}
+
+// ─── Inline Login Handler ───────────────────────────────────────────────
+function bindTrackingLogin() {
+    const loginBtn = document.getElementById('track-login-btn');
+    const emailInput = document.getElementById('track-login-email');
+    const passwordInput = document.getElementById('track-login-password');
+
+    if (!loginBtn) return;
+
+    const doLogin = async () => {
+        const email = emailInput?.value?.trim();
+        const password = passwordInput?.value?.trim();
+
+        if (!email) { showTrackLoginError('Please enter your email.'); return; }
+        if (!password) { showTrackLoginError('Please enter your password.'); return; }
+
+        loginBtn.disabled = true;
+        loginBtn.innerHTML = '<span class="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>';
+        hideTrackLoginError();
+
+        try {
+            const { auth, signInWithEmailAndPassword, db, doc } = await import('../config/firebase-config.js');
+            const fbModule = await import('https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js');
+            
+            const cred = await signInWithEmailAndPassword(auth, email, password);
+            const uid = cred.user.uid;
+
+            // Verify this user is an approved driver
+            const snap = await fbModule.getDoc(doc(db, 'users', uid));
+            
+            if (!snap.exists()) {
+                showTrackLoginError('Account not found in the system.');
+                resetLoginBtn(loginBtn);
+                return;
+            }
+
+            const profile = snap.data();
+
+            if (profile.role !== 'driver') {
+                showTrackLoginError('Only driver accounts can access tracking links.');
+                resetLoginBtn(loginBtn);
+                return;
+            }
+
+            if (profile.status !== 'active') {
+                showTrackLoginError('Your account is pending admin approval.');
+                resetLoginBtn(loginBtn);
+                return;
+            }
+
+            // ✅ Success — set driver info
+            currentTrip.driverId = uid;
+            currentTrip.driverName = profile.name || email;
+
+            // Load destination, show tracking UI, auto-start GPS
+            await loadDestinationAndAutoStart();
+
+        } catch (err) {
+            console.warn('Tracking login error:', err);
+            const errorMap = {
+                'auth/user-not-found': 'No account with this email.',
+                'auth/wrong-password': 'Incorrect password.',
+                'auth/invalid-credential': 'Invalid email or password.',
+                'auth/invalid-email': 'Invalid email format.',
+                'auth/too-many-requests': 'Too many attempts. Wait and retry.',
+            };
+            showTrackLoginError(errorMap[err.code] || `Login failed: ${err.message}`);
+            resetLoginBtn(loginBtn);
+        }
+    };
+
+    loginBtn.addEventListener('click', doLogin);
+    [emailInput, passwordInput].forEach(input => {
+        if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+    });
+}
+
+function resetLoginBtn(btn) {
+    btn.disabled = false;
+    btn.innerHTML = 'Sign In & Start Trip';
+}
+
+function showTrackLoginError(msg) {
+    const el = document.getElementById('track-login-status');
+    if (!el) return;
+    el.classList.remove('hidden');
+    el.textContent = msg;
+}
+
+function hideTrackLoginError() {
+    const el = document.getElementById('track-login-status');
+    if (el) el.classList.add('hidden');
+}
+
+// ─── Load Destination, Show UI, Auto-Start GPS ─────────────────────────
+async function loadDestinationAndAutoStart() {
+    // Parse booking ID from token
+    let bookingId = 'booking-demo-001';
+    try { if (trackToken) bookingId = atob(trackToken).replace('booking_', ''); } catch (e) {}
+    currentTrip.bookingId = bookingId;
+
+    // Fetch Destination from Firestore
+    try {
+        const { db, doc, getDoc } = await import('../config/firebase-config.js');
+        const snap = await getDoc(doc(db, 'logistics_slots', bookingId));
+        if (snap.exists()) {
+            const data = snap.data();
+            let destLat, destLng, siteNameStr;
+            
+            if (data.destLat && data.destLng) {
+                destLat = data.destLat;
+                destLng = data.destLng;
+                siteNameStr = data.destName || data.targetSite || 'Assigned Destination';
+            } else if (data.customLat && data.customLng) {
+                destLat = data.customLat;
+                destLng = data.customLng;
+                siteNameStr = data.customAddress || 'Custom Location';
+            } else {
+                const siteObj = DEMO_SITES.find(s => s.name === data.targetSite || s.id === data.targetSite) || DEMO_SITES[0];
+                destLat = siteObj.lat;
+                destLng = siteObj.lng;
+                siteNameStr = siteObj.name;
+            }
+            
+            currentTrip.site = { lat: destLat, lng: destLng, name: siteNameStr };
+            setDestination({ lat: destLat, lng: destLng });
+        }
+    } catch(e) {
+        console.warn('Failed to load destination:', e);
+    }
+
+    // Hide login gate, show tracking UI
+    const loginGate = document.getElementById('tracking-login-gate');
+    const mainUI = document.getElementById('tracking-main-ui');
+    if (loginGate) loginGate.style.display = 'none';
+    if (mainUI) mainUI.classList.remove('hidden');
 
     // Cache DOM
     els = {
         view: document.getElementById('tracking-link-view'),
-        trackBtn: document.getElementById('start-tracking-btn'),
-        btnIcon: document.getElementById('tracking-btn-icon'),
-        btnLabel: document.getElementById('tracking-btn-label'),
         statusText: document.getElementById('driver-status-text'),
-        statusDot: document.getElementById('driver-status-dot'),
         distText: document.getElementById('driver-dist-text'),
         etaText: document.getElementById('driver-eta-text'),
+        speedText: document.getElementById('driver-speed-text'),
         siteName: document.getElementById('driver-site-name'),
+        driverNameEl: document.getElementById('tracking-driver-name'),
+        gpsDot: document.getElementById('gps-dot'),
+        gpsLabel: document.getElementById('gps-status-label'),
+        stopSection: document.getElementById('stop-tracking-section'),
+        stopBtn: document.getElementById('stop-tracking-btn'),
         complianceSection: document.getElementById('compliance-section'),
         complianceInstructions: document.getElementById('compliance-instructions'),
         uploadBtn: document.getElementById('upload-photo-btn'),
@@ -56,96 +239,187 @@ export async function initTrackingLinkView(trackToken) {
         uploadStatus: document.getElementById('upload-status-text'),
     };
 
-    // Parse Token
-    let bookingId = 'booking-demo-001';
-    try { if (trackToken) bookingId = atob(trackToken).replace('booking_', ''); } catch (e) {}
-    currentTrip.bookingId = bookingId;
-
-    // Fetch Destination
-    try {
-        const { db, doc, getDoc } = await import('../config/firebase-config.js');
-        const snap = await getDoc(doc(db, 'logistics_slots', bookingId));
-        if (snap.exists()) {
-            const data = snap.data();
-            let destLat, destLng, siteNameStr;
-            if (data.customLat && data.customLng) {
-                destLat = data.customLat;
-                destLng = data.customLng;
-                siteNameStr = data.customAddress || 'Custom Location';
-            } else {
-                const siteObj = DEMO_SITES.find(s => s.id === data.targetSite) || DEMO_SITES[0];
-                destLat = siteObj.lat;
-                destLng = siteObj.lng;
-                siteNameStr = siteObj.name;
-            }
-            currentTrip.site = { lat: destLat, lng: destLng, name: siteNameStr };
-            setDestination({ lat: destLat, lng: destLng });
-        }
-    } catch(e) {}
-
-    // Set site name
+    // Set UI content
     if (els.siteName) els.siteName.textContent = currentTrip.site.name;
+    if (els.driverNameEl) els.driverNameEl.textContent = `/ ${currentTrip.driverName}`;
 
-    // Bind events
-    if (els.trackBtn) els.trackBtn.addEventListener('click', handleTrackToggle);
+    // Bind stop button
+    if (els.stopBtn) els.stopBtn.addEventListener('click', handleStopTracking);
     if (els.uploadBtn) els.uploadBtn.addEventListener('click', () => els.photoInput?.click());
     if (els.photoInput) els.photoInput.addEventListener('change', handlePhotoUpload);
-}
 
-export function destroyTrackingLinkView() {
-    if (trackingActive) {
-        stopTracking();
-        trackingActive = false;
-    }
-    initialized = false;
-    complianceUnlocked = false;
-    tripCompleted = false;
-}
-
-// ─── Tracking Toggle ────────────────────────────────────────────────────
-function handleTrackToggle() {
-    // If trip was completed, reset everything for next assignment
-    if (tripCompleted) {
-        return; // Link expired, do nothing
+    // Bind EXIT TRIP button
+    const closeBtn = document.getElementById('close-tracking-btn');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+            if (trackingActive) {
+                if (!confirm('Tracking is active. Are you sure you want to exit?')) return;
+                stopTracking();
+                trackingActive = false;
+            }
+            destroyTrackingLinkView();
+            window.location.reload();
+        });
     }
 
-    if (trackingActive) {
-        // STOP
-        if (latestDistanceKm > getGeofenceRadius()) {
-            alert(`You are not at the location. Please drive to the destination (Distance: ${latestDistanceKm.toFixed(2)} km) before stopping.`);
-            return;
-        }
+    // Initialize the live driver map
+    await initDriverMap();
 
-        stopTracking();
-        trackingActive = false;
-        
-        // Ensure compliance unlocks if for some reason geofence trigger missed
-        if (!complianceUnlocked) onGeofenceEnter(latestDistanceKm);
+    // AUTO-START GPS TRACKING immediately
+    autoStartGPS();
+}
 
-        setStatus('Arrived at Location', 'amber');
-        if (els.btnLabel) els.btnLabel.textContent = 'ARRIVED';
+// ─── Live Driver Map ────────────────────────────────────────────────────
+async function initDriverMap() {
+    const mapContainer = document.getElementById('driver-live-map');
+    if (!mapContainer) return;
+
+    try {
+        await initMaps();
+    } catch (e) {
+        mapContainer.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:center;height:100%;background:#F7F8F5;">
+                <p style="color:#94A3B8;font-size:13px;">Map loading failed</p>
+            </div>`;
+        return;
+    }
+
+    driverMap = L.map(mapContainer, {
+        center: [currentTrip.site.lat, currentTrip.site.lng],
+        zoom: 14,
+        zoomControl: false,
+        attributionControl: false
+    });
+
+    L.tileLayer(STANDARD_TILE_URL, {
+        attribution: STANDARD_TILE_ATTRIBUTION,
+        maxZoom: 19
+    }).addTo(driverMap);
+
+    // Destination marker
+    const destIcon = L.divIcon({
+        className: 'dest-pin',
+        html: `<div style="width:24px;height:24px;background:#E05535;border:3px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(224,85,53,0.4);display:flex;align-items:center;justify-content:center;">
+                 <div style="width:6px;height:6px;background:#fff;border-radius:50%;"></div>
+               </div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+    destMarker = L.marker([currentTrip.site.lat, currentTrip.site.lng], { icon: destIcon }).addTo(driverMap);
+    destMarker.bindPopup(`<div style="font-family:Inter,sans-serif;font-size:12px;font-weight:600;">${currentTrip.site.name}</div>`);
+
+    // 500m geofence circle
+    L.circle([currentTrip.site.lat, currentTrip.site.lng], {
+        radius: 500,
+        color: '#7A8C3E',
+        fillColor: '#7A8C3E',
+        fillOpacity: 0.08,
+        weight: 1,
+        dashArray: '6, 4'
+    }).addTo(driverMap);
+
+    setTimeout(() => driverMap?.invalidateSize(), 300);
+}
+
+/**
+ * Update the live map with the driver's real position.
+ */
+function updateDriverMapPosition(lat, lng) {
+    if (!driverMap) return;
+
+    const truckIcon = L.divIcon({
+        className: 'driver-truck',
+        html: `<div style="width:36px;height:36px;background:#1C1C1C;border:3px solid #7A8C3E;border-radius:8px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+                 <span style="font-size:20px;">🚛</span>
+               </div>`,
+        iconSize: [36, 36],
+        iconAnchor: [18, 18]
+    });
+
+    if (driverMarker) {
+        driverMarker.setLatLng([lat, lng]);
     } else {
-        // START
-        trackingActive = true;
-        setTrackingActiveUI();
-
-        startTracking(
-            currentTrip.driverId,
-            onPositionUpdate,
-            onGeofenceEnter,
-            (errMsg) => console.warn('Tracking error:', errMsg)
-        );
+        driverMarker = L.marker([lat, lng], { icon: truckIcon }).addTo(driverMap);
     }
+
+    // Update route line from driver to destination
+    if (routeLine) {
+        driverMap.removeLayer(routeLine);
+    }
+    routeLine = L.polyline(
+        [[lat, lng], [currentTrip.site.lat, currentTrip.site.lng]],
+        { color: '#7A8C3E', weight: 3, opacity: 0.6, dashArray: '8, 6' }
+    ).addTo(driverMap);
+
+    // Pan map to keep driver visible
+    driverMap.panTo([lat, lng], { animate: true, duration: 0.5 });
+}
+
+// ─── Auto-Start GPS ─────────────────────────────────────────────────────
+function autoStartGPS() {
+    trackingActive = true;
+    lastPositionTime = null;
+
+    setStatus('CONNECTING GPS...', '#F4A623');
+
+    startTracking(
+        currentTrip.driverId,
+        onPositionUpdate,
+        onGeofenceEnter,
+        (errMsg) => {
+            console.warn('GPS error:', errMsg);
+            setGPSStatus('error', `⚠️ ${errMsg}`);
+            setStatus('GPS ERROR', '#E05535');
+        }
+    );
 }
 
 // ─── Position Update Callback ───────────────────────────────────────────
 function onPositionUpdate(distanceKm, lat, lng) {
     latestDistanceKm = distanceKm;
-    if (els.distText) els.distText.textContent = `${distanceKm.toFixed(2)} km`;
 
-    // Rough ETA estimate (avg city speed 25 km/h)
+    // Distance
+    if (els.distText) els.distText.textContent = distanceKm.toFixed(2);
+
+    // ETA (avg city speed 25 km/h)
     const etaMinutes = Math.max(1, Math.round((distanceKm / 25) * 60));
-    if (els.etaText) els.etaText.textContent = `${etaMinutes} min`;
+    if (els.etaText) els.etaText.textContent = `${etaMinutes}`;
+
+    // Speed calculation
+    const now = Date.now();
+    if (lastPositionTime) {
+        const timeDiffHours = (now - lastPositionTime) / (1000 * 60 * 60);
+        if (timeDiffHours > 0) {
+            // Use distance-to-dest change as proxy (rough)
+            lastSpeedKmh = Math.min(80, Math.max(0, Math.round(distanceKm / Math.max(0.01, etaMinutes / 60))));
+        }
+    }
+    lastPositionTime = now;
+    if (els.speedText) els.speedText.textContent = `${lastSpeedKmh}`;
+
+    // GPS status → active
+    setGPSStatus('active', `📡 LIVE — ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+    setStatus('ON ROUTE', '#7A8C3E');
+
+    // Show stop button
+    if (els.stopSection) els.stopSection.classList.remove('hidden');
+
+    // Update live map
+    updateDriverMapPosition(lat, lng);
+}
+
+// ─── GPS Status UI ──────────────────────────────────────────────────────
+function setGPSStatus(state, text) {
+    if (state === 'active') {
+        if (els.gpsDot) { els.gpsDot.style.background = '#7A8C3E'; }
+        if (els.gpsLabel) { els.gpsLabel.textContent = text; els.gpsLabel.style.color = '#7A8C3E'; }
+    } else if (state === 'error') {
+        if (els.gpsDot) { els.gpsDot.style.background = '#E05535'; }
+        if (els.gpsLabel) { els.gpsLabel.textContent = text; els.gpsLabel.style.color = '#E05535'; }
+    } else {
+        if (els.gpsDot) { els.gpsDot.style.background = '#F4A623'; }
+        if (els.gpsLabel) { els.gpsLabel.textContent = text; els.gpsLabel.style.color = '#F4A623'; }
+    }
 }
 
 // ─── Geofence Trigger ───────────────────────────────────────────────────
@@ -153,29 +427,44 @@ function onGeofenceEnter(distanceKm) {
     if (complianceUnlocked) return;
     complianceUnlocked = true;
 
-    // Vibrate alert
     if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
 
-    // Update status
-    setStatus('Site Reached — Upload Required', 'amber');
+    setStatus('SITE REACHED', '#F4A623');
 
-    // Unlock compliance section
     const cs = els.complianceSection;
     if (cs) {
-        cs.classList.remove('opacity-40', 'pointer-events-none', 'translate-y-4');
-        cs.classList.add('opacity-100');
+        cs.style.opacity = '1';
+        cs.style.pointerEvents = 'auto';
+        cs.style.transform = 'translateY(0)';
     }
 
     if (els.complianceInstructions) {
         els.complianceInstructions.innerHTML = `
-            <span class="text-emerald-400 font-semibold">📸 Photo Required!</span>
-            <span class="text-slate-300 ml-1">Upload a departing photo of the truck to complete.</span>`;
+            <span style="color:#7A8C3E;font-weight:600;">📸 Photo Required!</span>
+            <span style="color:#64748B;margin-left:4px;">Upload a departing photo to complete delivery.</span>`;
     }
 
-    if (els.uploadBtn) {
-        els.uploadBtn.disabled = false;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#7A8C3E] text-white py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest hover:bg-[#6c7d36] transition-all duration-300 active:scale-[0.97]';
+    if (els.uploadBtn) els.uploadBtn.disabled = false;
+}
+
+// ─── Stop Tracking ──────────────────────────────────────────────────────
+function handleStopTracking() {
+    if (tripCompleted) return;
+
+    if (latestDistanceKm > getGeofenceRadius()) {
+        alert(`You are ${latestDistanceKm.toFixed(2)} km away. Drive to the destination before stopping.`);
+        return;
     }
+
+    stopTracking();
+    trackingActive = false;
+
+    if (!complianceUnlocked) onGeofenceEnter(latestDistanceKm);
+
+    setStatus('ARRIVED', '#F4A623');
+    setGPSStatus('waiting', '📍 ARRIVED AT SITE');
+
+    if (els.stopSection) els.stopSection.classList.add('hidden');
 }
 
 // ─── Photo Upload ───────────────────────────────────────────────────────
@@ -183,14 +472,12 @@ async function handlePhotoUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
 
-    // Show progress
     if (els.progressContainer) els.progressContainer.classList.remove('hidden');
     if (els.uploadBtn) {
         els.uploadBtn.innerHTML = `
             <span class="inline-block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
             <span>UPLOADING PROOF...</span>`;
         els.uploadBtn.disabled = true;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#1C1C1C] text-white py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest cursor-wait';
     }
 
     try {
@@ -199,7 +486,6 @@ async function handlePhotoUpload(e) {
         });
         completeDelivery(result.url);
     } catch (err) {
-        // If Firebase Storage fails, simulate upload for demo
         const result = await simulateUpload((progress) => {
             if (els.progressBar) els.progressBar.style.width = `${progress}%`;
         });
@@ -208,15 +494,12 @@ async function handlePhotoUpload(e) {
 }
 
 function completeDelivery(photoUrl) {
-    // Hide progress
     if (els.progressContainer) els.progressContainer.classList.add('hidden');
 
-    // Success state
     if (els.uploadBtn) {
         els.uploadBtn.innerHTML = `
-            <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+            <svg style="width:24px;height:24px;" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
             <span>VERIFIED BY SYSTEM</span>`;
-        els.uploadBtn.className = 'w-full flex justify-center items-center gap-3 bg-[#F8FAFC] text-[#7A8C3E] border border-[#7A8C3E]/20 py-5 px-8 text-[10px] font-extrabold uppercase tracking-widest';
         els.uploadBtn.disabled = true;
     }
 
@@ -225,10 +508,9 @@ function completeDelivery(photoUrl) {
         els.uploadStatus.textContent = `Photo verified at ${new Date().toLocaleTimeString()}`;
     }
 
-    setStatus('Delivery Successful', 'emerald');
+    setStatus('DELIVERY COMPLETE', '#7A8C3E');
+    setGPSStatus('active', '✅ DELIVERY VERIFIED');
 
-    // ── POST-DELIVERY TRANSITION ────────────────────────────────────
-    // After 3 seconds: stop tracking, clear screen, show "Ready for Next"
     setTimeout(() => {
         if (trackingActive) {
             stopTracking();
@@ -238,126 +520,45 @@ function completeDelivery(photoUrl) {
     }, 3000);
 }
 
-// ─── Trip Completed State ───────────────────────────────────────────────
-/**
- * Renders the "Link Expired" screen.
- */
+// ─── Trip Completed ─────────────────────────────────────────────────────
 function showTripCompletedState() {
     tripCompleted = true;
     complianceUnlocked = false;
 
-    // Remove tracking-active styles
-    if (els.view) els.view.classList.remove('tracking-active');
-
-    // ── Update Status Card ──────────────────────────────────────────
-    setStatus('Trip Completed', 'emerald');
-    if (els.distText) els.distText.textContent = '0.00 km';
-    if (els.etaText) els.etaText.textContent = '0 min';
+    setStatus('TRIP COMPLETED', '#7A8C3E');
+    if (els.distText) els.distText.textContent = '0.00';
+    if (els.etaText) els.etaText.textContent = '0';
+    if (els.speedText) els.speedText.textContent = '0';
     if (els.siteName) els.siteName.textContent = '✅ Verified & Closed';
+    if (els.stopSection) els.stopSection.classList.add('hidden');
 
-    // Disable track button
-    if (els.trackBtn) els.trackBtn.style.display = 'none';
+    setGPSStatus('active', '✅ LINK EXPIRED');
 
-    // ── Transform compliance section → Link Expired ─────────────────
     const cs = els.complianceSection;
     if (cs) {
-        cs.classList.remove('opacity-40', 'pointer-events-none', 'translate-y-4');
-        cs.classList.add('opacity-100');
+        cs.style.opacity = '1';
+        cs.style.pointerEvents = 'auto';
+        cs.style.transform = 'translateY(0)';
         cs.innerHTML = `
             <div class="text-center py-6">
-                <!-- Success checkmark -->
-                <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/15 border-2 border-emerald-500/30 flex items-center justify-center">
-                    <svg class="w-8 h-8 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <div style="width:64px;height:64px;margin:0 auto 1rem;border-radius:50%;background:rgba(122,140,62,0.1);border:2px solid rgba(122,140,62,0.3);display:flex;align-items:center;justify-content:center;">
+                    <svg style="width:32px;height:32px;color:#7A8C3E;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                     </svg>
                 </div>
-
-                <h3 class="text-xl font-bold text-white mb-2">Departing Verified</h3>
-                <p class="text-amber-400 text-sm font-medium mb-4">This tracking link is now expired.</p>
-
-                <p class="text-slate-500 text-xs mt-4">You may safely close this page.</p>
-                
-                <button onclick="window.close()" class="mt-6 px-6 py-2.5 bg-slate-700 hover:bg-slate-600 rounded-xl text-sm text-white font-semibold transition-all">Close Window</button>
+                <h3 style="font-size:20px;font-weight:800;color:#1C1C1C;margin-bottom:0.5rem;">Departing Verified</h3>
+                <p style="color:#F4A623;font-size:14px;font-weight:500;margin-bottom:1rem;">This tracking link is now expired.</p>
+                <p style="color:#94A3B8;font-size:12px;">You may safely close this page.</p>
+                <button onclick="window.close()" style="margin-top:1.5rem;padding:0.625rem 1.5rem;background:#F7F8F5;border:1px solid rgba(28,28,28,0.1);font-size:14px;color:#1C1C1C;font-weight:600;cursor:pointer;">Close Window</button>
             </div>
         `;
     }
 }
 
-// ─── UI State Helpers ───────────────────────────────────────────────────
-function setTrackingActiveUI() {
-    if (els.view) els.view.classList.add('tracking-active');
-    if (els.btnLabel) els.btnLabel.textContent = 'STOP';
-    if (els.btnIcon) els.btnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>`;
-    setStatus('On Route', 'emerald');
-}
-
-function resetDriverUI() {
-    if (els.view) els.view.classList.remove('tracking-active');
-    if (els.btnLabel) els.btnLabel.textContent = 'START';
-    if (els.btnIcon) els.btnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>`;
-    setStatus('Ready to Depart', 'slate');
-
-    if (els.distText) els.distText.textContent = '-- km';
-    if (els.etaText) els.etaText.textContent = '-- min';
-    if (els.siteName) els.siteName.textContent = currentTrip.site.name;
-
-    // Reset button styling (clear any custom inline styles from trip-complete)
-    const core = els.trackBtn?.querySelector('.track-btn-core');
-    if (core) { core.style.background = ''; core.style.borderColor = ''; core.style.boxShadow = ''; }
-    const ring1 = els.trackBtn?.querySelector('.track-btn-ring-1');
-    const ring2 = els.trackBtn?.querySelector('.track-btn-ring-2');
-    if (ring1) ring1.style.background = '';
-    if (ring2) ring2.style.background = '';
-
-    // Re-lock and restore compliance section
-    complianceUnlocked = false;
-    const cs = els.complianceSection;
-    if (cs) {
-        cs.classList.add('opacity-40', 'pointer-events-none', 'translate-y-4');
-        cs.classList.remove('opacity-100');
-        cs.innerHTML = `
-            <h4 class="font-semibold flex items-center gap-2 mb-3 text-sm">
-                <svg class="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                Site Arrival Compliance
-            </h4>
-            <p id="compliance-instructions" class="text-xs text-slate-400 mb-4 leading-relaxed">
-                <span class="text-slate-500">🔒 Locked</span> — Approach within 500m of the site to unlock dust mitigation photo upload.
-            </p>
-
-            <input type="file" id="compliance-photo" accept="image/*" capture="environment" class="hidden">
-            <button id="upload-photo-btn" class="w-full flex justify-center items-center gap-3 bg-slate-700 text-slate-400 py-4 rounded-2xl font-semibold cursor-not-allowed text-sm" disabled>
-                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                <span>Take Dust Mitigation Photo</span>
-            </button>
-
-            <div id="upload-progress" class="hidden w-full bg-slate-700 rounded-full h-1.5 mt-4 overflow-hidden">
-                <div id="upload-progress-bar" class="bg-gradient-to-r from-blue-500 to-emerald-500 h-full rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
-            </div>
-            <p id="upload-status-text" class="hidden text-xs text-emerald-400 mt-3 text-center font-medium"></p>
-        `;
-
-        // Re-cache the DOM elements after innerHTML replacement
-        els.complianceInstructions = document.getElementById('compliance-instructions');
-        els.uploadBtn = document.getElementById('upload-photo-btn');
-        els.photoInput = document.getElementById('compliance-photo');
-        els.progressContainer = document.getElementById('upload-progress');
-        els.progressBar = document.getElementById('upload-progress-bar');
-        els.uploadStatus = document.getElementById('upload-status-text');
-
-        // Re-bind events on new elements
-        if (els.uploadBtn) els.uploadBtn.addEventListener('click', () => els.photoInput?.click());
-        if (els.photoInput) els.photoInput.addEventListener('change', handlePhotoUpload);
-    }
-}
-
+// ─── UI Helpers ─────────────────────────────────────────────────────────
 function setStatus(text, color) {
-    const colors = {
-        slate:   { text: 'text-slate-300',   dot: 'bg-slate-400' },
-        emerald: { text: 'text-emerald-400', dot: 'bg-emerald-400' },
-        amber:   { text: 'text-amber-400',   dot: 'bg-amber-400' },
-        red:     { text: 'text-red-400',     dot: 'bg-red-400' },
-    };
-    const c = colors[color] || colors.slate;
-    if (els.statusText) { els.statusText.textContent = text; els.statusText.className = `text-xl font-bold ${c.text}`; }
-    if (els.statusDot)  { els.statusDot.className = `w-3 h-3 rounded-full ${c.dot} ${color === 'emerald' ? 'animate-pulse' : ''}`; }
+    if (els.statusText) {
+        els.statusText.textContent = text;
+        els.statusText.style.color = color || '#1C1C1C';
+    }
 }

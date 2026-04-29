@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const trackToken = urlParams.get('track_token');
     
     if (trackToken) {
-        // Bypass normal auth and open tracking immediately
+        // Show tracking view directly — it has its own login gate
         showView('tracking-link-view');
         initTrackingLinkView(trackToken);
         return;

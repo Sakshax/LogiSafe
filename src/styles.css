@@ -1471,6 +1471,7 @@ select.auth-input {
 .admin-tab {
     position: relative;
     transition: all 0.2s ease;
+    flex-shrink: 0;
 }
 
 .admin-tab::after {
@@ -1491,4 +1492,91 @@ select.auth-input {
 
 .admin-tab:hover {
     color: var(--color-text) !important;
+}
+
+/* ── Responsive List Cards ───────────────────────────────────────── */
+.responsive-list-card {
+    /* Base styles inherit from inline utilities, but we add wrap for mobile */
+}
+
+@media (max-width: 768px) {
+    .responsive-list-card {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 0.75rem !important;
+    }
+    
+    .responsive-list-card > div:first-child:not(.flex-1) {
+        width: 100% !important;
+        text-align: left !important;
+        border-right: none !important;
+        border-bottom: 1px solid var(--color-border) !important;
+        padding-right: 0 !important;
+        padding-bottom: 0.5rem !important;
+        display: flex !important;
+        gap: 0.5rem !important;
+        align-items: center !important;
+    }
+    
+    .responsive-list-card > .flex-1 {
+        width: 100% !important;
+    }
+    
+    .responsive-list-card > div:last-of-type,
+    .responsive-list-card > button {
+        align-self: flex-start !important;
+        margin-top: 0.25rem !important;
+    }
+
+    .responsive-list-card > .list-actions-wrapper {
+        width: 100% !important;
+        flex-wrap: wrap !important;
+        justify-content: flex-start !important;
+        gap: 0.5rem !important;
+        border-top: 1px solid var(--color-border);
+        padding-top: 0.75rem;
+        margin-top: 0.25rem;
+    }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   LEAFLET ROUTING MACHINE — Hide Instruction Panel
+   ══════════════════════════════════════════════════════════════════════ */
+
+.leaflet-routing-container {
+    display: none !important;
+}
+
+/* Spin animation for loading spinners */
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   DRIVER ASSIGNMENT MODAL — Responsive
+   ══════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+    #driver-assign-modal > div {
+        border-radius: 1rem !important;
+        max-height: 95vh !important;
+        padding: 1rem !important;
+    }
+
+    /* Stack grid to single column on mobile */
+    #driver-assign-modal [style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+    }
+
+    /* Booking info strip */
+    #driver-assign-modal [style*="gap:2rem"] {
+        gap: 1rem !important;
+    }
+
+    /* Mini map minimum height */
+    #assign-mini-map {
+        min-height: 250px !important;
+    }
 }

@@ -8,14 +8,16 @@
  *  TAB 4: Live Alerts + Compliance Records from Firestore
  */
 
-import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, MIRA_BHAYANDAR_CENTER, DEMO_SITES, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION } from '../config/maps-config.js';
+import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, MIRA_BHAYANDAR_CENTER, DEMO_SITES, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION, addRoadRoute, createDriverIcon } from '../config/maps-config.js';
 import { getBookings, cancelBooking, assignDriverAndSendLink } from '../modules/scheduler.js';
 import {
     getPendingDrivers, approveDriver, rejectDriver,
-    getAllDrivers, getAllManagers, updateUserStatus
+    getAllDrivers, getAllManagers, updateUserStatus,
+    getDriversWithLocations, subscribeToPendingDrivers, subscribeToAllDrivers
 } from '../modules/auth.js';
 import { listenToActiveTrucks } from '../modules/tracking.js';
 import { createTruckIcon } from '../config/maps-config.js';
+import { calculateDistance } from '../utils/haversine.js';
 import {
     db, collection, getDocs, query, where, orderBy, onSnapshot, deleteDoc, doc
 } from '../config/firebase-config.js';
@@ -147,41 +149,45 @@ function renderStats() {
 //  TAB 1: DASHBOARD (Pending Approvals + Heatmap + Audit Log)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+let pendingDriversUnsubscribe = null;
 async function loadPendingDrivers() {
-    const section = document.getElementById('pending-drivers-section');
-    const container = document.getElementById('pending-drivers-list');
-    const badge = document.getElementById('pending-count-badge');
-    if (!section || !container) return;
+    if (pendingDriversUnsubscribe) pendingDriversUnsubscribe();
 
-    let drivers = [];
-    try { drivers = await getPendingDrivers(); } catch (e) {}
+    pendingDriversUnsubscribe = subscribeToPendingDrivers((drivers) => {
+        const section = document.getElementById('pending-drivers-section');
+        const container = document.getElementById('pending-drivers-list');
+        const badge = document.getElementById('pending-count-badge');
+        if (!section || !container) return;
 
-    if (badge) badge.textContent = drivers.length;
+        if (badge) badge.textContent = drivers.length;
 
-    if (drivers.length === 0) {
-        section.classList.add('hidden');
-        return;
-    }
+        if (drivers.length === 0) {
+            section.classList.add('hidden');
+            return;
+        }
 
-    section.classList.remove('hidden');
-    container.innerHTML = drivers.map((d, i) => {
-        const regDate = d.registeredAt?.toDate ? d.registeredAt.toDate().toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
-        return `
-        <div id="pending-${d.uid}" class="flex items-center gap-6 p-6 border border-[#1C1C1C]/10 bg-white transition-all duration-300">
-            <div class="flex-shrink-0 w-12 h-12 rounded-full bg-[#F8FAFC] flex items-center justify-center border border-[#1C1C1C]/10"><span class="text-xl">🚛</span></div>
-            <div class="flex-1 min-w-0">
-                <p class="ui-label text-[#7A8C3E] mb-1">/ Driver Approval Required</p>
-                <p class="font-bold text-[#1C1C1C] text-lg uppercase tracking-tight">${d.name || 'Unnamed'}</p>
-                <p class="text-xs text-[#64748B] mt-1">${d.email} · <span class="text-[#E05535] font-bold">${d.truckLicense || '—'}</span></p>
-            </div>
-            <div class="flex items-center gap-4 flex-shrink-0">
-                <button class="approve-driver-btn btn-primary px-6 py-3 text-[10px]" data-uid="${d.uid}" data-name="${d.name}">Approve</button>
-                <button class="reject-driver-btn border border-[#1C1C1C]/10 px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-[#E05535] hover:bg-[#E05535]/5" data-uid="${d.uid}" data-name="${d.name}">Reject</button>
-            </div>
-        </div>`;
-    }).join('');
+        section.classList.remove('hidden');
+        container.innerHTML = drivers.map((d, i) => {
+            const regDate = d.registeredAt?.toDate ? d.registeredAt.toDate().toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+            return `
+            <div id="pending-${d.uid}" class="responsive-list-card flex items-center gap-6 p-6 border border-[#1C1C1C]/10 bg-white transition-all duration-300">
+                <div class="flex-shrink-0 w-12 h-12 rounded-full bg-[#F8FAFC] flex items-center justify-center border border-[#1C1C1C]/10"><span class="text-xl">🚛</span></div>
+                <div class="flex-1 min-w-0">
+                    <p class="ui-label text-[#7A8C3E] mb-1">/ Driver Approval Required</p>
+                    <p class="font-bold text-[#1C1C1C] text-lg uppercase tracking-tight">${d.name || 'Unnamed'}</p>
+                    <p class="text-xs text-[#64748B] mt-1">${d.email} · <span class="text-[#E05535] font-bold">${d.truckLicense || '—'}</span></p>
+                </div>
+                <div class="list-actions-wrapper flex items-center gap-4 flex-shrink-0">
+                    <button class="approve-driver-btn btn-primary px-6 py-3 text-[10px]" data-uid="${d.uid}" data-name="${d.name}">Approve</button>
+                    <button class="reject-driver-btn border border-[#1C1C1C]/10 px-6 py-3 text-[10px] font-bold uppercase tracking-widest text-[#E05535] hover:bg-[#E05535]/5" data-uid="${d.uid}" data-name="${d.name}">Reject</button>
+                </div>
+            </div>`;
+        }).join('');
 
-    bindPendingActions(container, badge, section);
+        bindPendingActions(container, badge, section);
+    });
+
+    unsubscribeListeners.push(pendingDriversUnsubscribe);
 }
 
 function bindPendingActions(container, badge, section) {
@@ -256,57 +262,63 @@ function renderAuditLog() {
 //  TAB 2: USER MANAGEMENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+let allDriversUnsubscribe = null;
 async function loadAllDrivers() {
-    const container = document.getElementById('admin-drivers-list');
-    const badge = document.getElementById('driver-count-badge');
-    if (!container) return;
+    if (allDriversUnsubscribe) allDriversUnsubscribe();
 
-    container.innerHTML = '<p class="text-slate-500 text-sm text-center py-4">Loading...</p>';
-    let drivers = [];
-    try { drivers = await getAllDrivers(); } catch (e) {}
-    if (badge) badge.textContent = drivers.length;
+    allDriversUnsubscribe = subscribeToAllDrivers((drivers) => {
+        const container = document.getElementById('admin-drivers-list');
+        const badge = document.getElementById('driver-count-badge');
+        if (!container) return;
 
-    if (drivers.length === 0) {
-        container.innerHTML = '<p class="text-slate-500 text-sm text-center py-6">No drivers registered yet.</p>';
-        return;
-    }
+        if (badge) badge.textContent = drivers.length;
 
-    const statusConfig = {
-        active:   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', label: '✓ Active' },
-        pending:  { bg: 'bg-amber-500/10',   text: 'text-amber-400',   border: 'border-amber-500/20',   label: '⏳ Pending' },
-        rejected: { bg: 'bg-red-500/10',     text: 'text-red-400',     border: 'border-red-500/20',     label: '✕ Rejected' },
-        suspended:{ bg: 'bg-slate-500/10',   text: 'text-slate-400',   border: 'border-slate-500/20',   label: '🚫 Suspended' },
-    };
+        if (drivers.length === 0) {
+            container.innerHTML = '<p class="text-slate-500 text-sm text-center py-6">No drivers registered yet.</p>';
+            return;
+        }
 
-    container.innerHTML = drivers.map(d => {
-        const sc = statusConfig[d.status] || statusConfig.pending;
-        const regDate = d.registeredAt?.toDate ? d.registeredAt.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-        return `
-        <div class="flex items-center gap-4 p-3 rounded-xl border ${sc.border} ${sc.bg} transition-all duration-200 hover:border-white/10">
-            <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-500/15 to-emerald-600/5 flex items-center justify-center flex-shrink-0">
-                <span class="text-sm">🚛</span>
-            </div>
-            <div class="flex-1 min-w-0">
-                <p class="font-semibold text-white text-sm truncate">${d.name || 'Unnamed'}</p>
-                <p class="text-[11px] text-slate-400 mt-0.5">${d.email} · <span class="font-mono text-amber-400">${d.truckLicense || '—'}</span> · ${regDate}</p>
-            </div>
-            <span class="px-2 py-1 rounded-md text-[10px] font-bold ${sc.bg} ${sc.text} border ${sc.border}">${sc.label}</span>
-            <div class="flex gap-1 flex-shrink-0">
-                ${d.status !== 'active' ? `<button class="user-action-btn px-2 py-1 rounded-md bg-emerald-600/15 text-emerald-400 text-[10px] font-semibold hover:bg-emerald-600/30 transition-all" data-uid="${d.uid}" data-action="active" title="Activate">✓</button>` : ''}
-                ${d.status !== 'suspended' ? `<button class="user-action-btn px-2 py-1 rounded-md bg-slate-600/15 text-slate-400 text-[10px] font-semibold hover:bg-slate-600/30 transition-all" data-uid="${d.uid}" data-action="suspended" title="Suspend">🚫</button>` : ''}
-                ${d.status !== 'rejected' ? `<button class="user-action-btn px-2 py-1 rounded-md bg-red-600/10 text-red-400 text-[10px] font-semibold hover:bg-red-600/30 transition-all" data-uid="${d.uid}" data-action="rejected" title="Reject">✕</button>` : ''}
-            </div>
-        </div>`;
-    }).join('');
+        const statusConfig = {
+            active:   { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20', label: '✓ Active' },
+            pending:  { bg: 'bg-amber-500/10',   text: 'text-amber-400',   border: 'border-amber-500/20',   label: '⏳ Pending' },
+            rejected: { bg: 'bg-red-500/10',     text: 'text-red-400',     border: 'border-red-500/20',     label: '✕ Rejected' },
+            suspended:{ bg: 'bg-slate-500/10',   text: 'text-slate-400',   border: 'border-slate-500/20',   label: '🚫 Suspended' },
+        };
 
-    container.querySelectorAll('.user-action-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const { uid, action } = btn.dataset;
-            btn.disabled = true; btn.textContent = '…';
-            await updateUserStatus(uid, action);
-            await loadAllDrivers(); // Refresh
+        container.innerHTML = drivers.map(d => {
+            const sc = statusConfig[d.status] || statusConfig.pending;
+            const regDate = d.registeredAt?.toDate ? d.registeredAt.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+            return `
+            <div class="responsive-list-card flex items-center gap-4 p-3 rounded-xl border ${sc.border} ${sc.bg} transition-all duration-200 hover:border-white/10">
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-500/15 to-emerald-600/5 flex items-center justify-center flex-shrink-0">
+                    <span class="text-sm">🚛</span>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <p class="font-semibold text-white text-sm truncate" style="color:#1c1c1c;">${d.name || 'Unnamed'}</p>
+                    <p class="text-[11px] text-slate-400 mt-0.5" style="color:#64748b;">${d.email} · <span class="font-mono text-amber-400">${d.truckLicense || '—'}</span> · ${regDate}</p>
+                </div>
+                <div class="list-actions-wrapper flex items-center gap-2 flex-shrink-0">
+                    <span class="px-2 py-1 rounded-md text-[10px] font-bold ${sc.bg} ${sc.text} border ${sc.border}">${sc.label}</span>
+                    <div class="flex gap-1 flex-shrink-0">
+                        ${d.status !== 'active' ? `<button class="user-action-btn flex items-center justify-center w-7 h-7 rounded-md bg-emerald-600/15 text-emerald-400 hover:bg-emerald-600/30 transition-all" data-uid="${d.uid}" data-action="active" title="Activate"><svg style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></button>` : ''}
+                        ${d.status !== 'suspended' ? `<button class="user-action-btn flex items-center justify-center w-7 h-7 rounded-md bg-slate-600/15 text-slate-400 hover:bg-slate-600/30 transition-all" data-uid="${d.uid}" data-action="suspended" title="Suspend"><svg style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg></button>` : ''}
+                        ${d.status !== 'rejected' ? `<button class="user-action-btn flex items-center justify-center w-7 h-7 rounded-md bg-red-600/10 text-red-400 hover:bg-red-600/30 transition-all" data-uid="${d.uid}" data-action="rejected" title="Reject"><svg style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></button>` : ''}
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+
+        container.querySelectorAll('.user-action-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const { uid, action } = btn.dataset;
+                btn.disabled = true; btn.textContent = '…';
+                await updateUserStatus(uid, action);
+                // No need to manually refresh as the listener handles it automatically
+            });
         });
     });
+
+    unsubscribeListeners.push(allDriversUnsubscribe);
 }
 
 async function loadAllManagers() {
@@ -327,7 +339,7 @@ async function loadAllManagers() {
     container.innerHTML = managers.map(m => {
         const regDate = m.registeredAt?.toDate ? m.registeredAt.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
         return `
-        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
+        <div class="responsive-list-card flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
             <div class="w-10 h-10 rounded-full bg-[#F8FAFC] flex items-center justify-center flex-shrink-0 border border-[#1C1C1C]/10">
                 <span class="text-sm">📋</span>
             </div>
@@ -335,8 +347,10 @@ async function loadAllManagers() {
                 <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${m.name || 'Unnamed'}</p>
                 <p class="text-[10px] text-[#64748B] font-medium uppercase tracking-wider mt-1">${m.email} · Registered ${regDate}</p>
             </div>
-            <span class="ui-label text-[#7A8C3E]">Active</span>
-            <button class="user-action-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all" data-uid="${m.uid}" data-action="suspended" title="Suspend">✕</button>
+            <div class="list-actions-wrapper flex items-center gap-4 flex-shrink-0">
+                <span class="ui-label text-[#7A8C3E]">Active</span>
+                <button class="user-action-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all" data-uid="${m.uid}" data-action="suspended" title="Suspend"><svg style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></button>
+            </div>
         </div>`;
     }).join('');
 
@@ -390,7 +404,7 @@ async function loadAllBookings() {
         const dateStr = b.date || '—';
         const timeStr = b.time ? to12Hour(b.time) : '—';
         return `
-        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
+        <div class="responsive-list-card flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
             <div class="w-16 text-center border-r border-[#1C1C1C]/10 pr-6 flex-shrink-0">
                 <p class="text-[10px] font-extrabold text-[#1C1C1C]">${timeStr.split(' ')[0] || ''}</p>
                 <p class="text-[9px] font-bold text-[#64748B] uppercase">${timeStr.split(' ')[1] || ''}</p>
@@ -405,16 +419,18 @@ async function loadAllBookings() {
                     </div>
                 ` : ''}
             </div>
-            <div class="flex items-center gap-3 flex-shrink-0 h-full">
-                <span class="w-1.5 h-1.5 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
-                <span class="ui-label ${sc.text}">${b.status || '—'}</span>
+            <div class="list-actions-wrapper flex items-center gap-3 flex-shrink-0 h-full">
+                <div class="flex items-center gap-2 mr-2">
+                    <span class="w-1.5 h-1.5 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
+                    <span class="ui-label ${sc.text}">${b.status || '—'}</span>
+                </div>
+                ${b.status === 'PENDING_ADMIN' && b.firestoreId ? `
+                    <button class="send-link-btn btn-primary px-4 py-2 text-[9px]" data-id="${b.firestoreId}">Assign Driver</button>
+                ` : ''}
+                ${b.firestoreId ? `
+                    <button class="cancel-booking-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all" data-id="${b.firestoreId}" title="Cancel booking"><svg style="width:16px;height:16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></button>
+                ` : ''}
             </div>
-            ${b.status === 'PENDING_ADMIN' && b.firestoreId ? `
-                <button class="send-link-btn btn-primary px-4 py-2 text-[9px]" data-id="${b.firestoreId}">Assign Driver</button>
-            ` : ''}
-            ${b.firestoreId ? `
-                <button class="cancel-booking-btn flex items-center justify-center w-8 h-8 rounded-full border border-[#E05535]/20 text-[#E05535] hover:bg-[#E05535]/5 transition-all ml-4" data-id="${b.firestoreId}" title="Cancel booking">✕</button>
-            ` : ''}
         </div>`;
     }).join('');
 
@@ -433,25 +449,17 @@ async function loadAllBookings() {
 
     container.querySelectorAll('.send-link-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
-            btn.disabled = true; btn.textContent = 'Sending...';
-            // Mock driver assignment
-            const mockDriver = "Nearest Available Driver";
-            const mockTruck = "MH-04-AB-1234";
+            const bookingId = btn.dataset.id;
+            // Fetch the booking data from Firestore to get destination
+            let bookingData = null;
+            try {
+                const { getDoc } = await import('../config/firebase-config.js');
+                const snap = await getDoc(doc(db, 'logistics_slots', bookingId));
+                if (snap.exists()) bookingData = snap.data();
+            } catch (e) {}
 
-            const trackingToken = await assignDriverAndSendLink(btn.dataset.id, mockDriver, mockTruck);
-            
-            const link = `${window.location.origin}${window.location.pathname}?track_token=${trackingToken}`;
-            const driverPhone = "919766802047"; // Placeholder for real production number
-            const message = encodeURIComponent(`Hi ${mockDriver},\n\nYou have been assigned a new construction delivery trip.\nTrack here: ${link}`);
-            
-            // Production WhatsApp Integration: wa.me
-            const waUrl = `https://wa.me/${driverPhone}?text=${message}`;
-            
-            if (confirm(`Assignment ready for ${mockDriver}.\n\nOpen WhatsApp to send tracking link?`)) {
-                window.open(waUrl, '_blank');
-            }
-            
-            await loadAllBookings();
+            // Show driver assignment modal
+            openDriverAssignmentModal(bookingId, bookingData);
         });
     });
 }
@@ -539,7 +547,7 @@ async function loadComplianceRecords() {
     container.innerHTML = records.map(r => {
         const uploadDate = r.uploadedAt?.toDate ? r.uploadedAt.toDate().toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
         return `
-        <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all">
+        <div class="responsive-list-card flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all">
             <div class="w-10 h-10 rounded-full bg-[#F8FAFC] flex items-center justify-center flex-shrink-0 border border-[#1C1C1C]/10">
                 <span class="text-sm">📸</span>
             </div>
@@ -548,7 +556,9 @@ async function loadComplianceRecords() {
                 <p class="font-bold text-[#1C1C1C] text-xs uppercase tracking-tight">Booking: ${r.bookingId || '—'}</p>
                 <p class="text-[9px] text-[#64748B] font-bold uppercase mt-1">${uploadDate} · ${r.verified ? '✅ Verified' : '⏳ Pending'}</p>
             </div>
-            ${r.url ? `<a href="${r.url}" target="_blank" class="px-4 py-2 border border-[#1C1C1C]/10 text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest hover:bg-[#F8FAFC] transition-all">View Photo</a>` : ''}
+            <div class="list-actions-wrapper flex flex-shrink-0">
+                ${r.url ? `<a href="${r.url}" target="_blank" class="px-4 py-2 border border-[#1C1C1C]/10 text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest hover:bg-[#F8FAFC] transition-all">View Photo</a>` : ''}
+            </div>
         </div>`;
     }).join('');
 }
@@ -648,23 +658,21 @@ function reconcileTruckMarkers(trucks) {
             truckMarkers[truck.id] = marker;
         }
 
-        // Draw/Update routing path (polyline)
+        // Draw/Update routing path (road-following via OSRM)
         if (truck.destLat && truck.destLng) {
-            const pathPoints = [
-                [truck.lat, truck.lng],
-                [truck.destLat, truck.destLng]
-            ];
-            
+            // Remove old route if truck has moved
             if (truckPaths[truck.id]) {
-                truckPaths[truck.id].setLatLngs(pathPoints);
-            } else {
-                truckPaths[truck.id] = L.polyline(pathPoints, {
-                    color: '#8b5cf6', // Violet for Admin
-                    weight: 3,
-                    opacity: 0.5,
-                    dashArray: '8, 8'
-                }).addTo(adminMap);
+                try { truckPaths[truck.id].remove(); } catch(e) {}
+                try { adminMap.removeLayer(truckPaths[truck.id]); } catch(e) {}
+                delete truckPaths[truck.id];
             }
+            
+            truckPaths[truck.id] = addRoadRoute(
+                adminMap,
+                [truck.lat, truck.lng],
+                [truck.destLat, truck.destLng],
+                { color: '#8b5cf6', weight: 4, opacity: 0.6 }
+            );
         }
     });
 
@@ -679,5 +687,345 @@ function reconcileTruckMarkers(trucks) {
                 delete truckPaths[id];
             }
         }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  DRIVER ASSIGNMENT MODAL (Production — Real Driver Selection)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+let assignmentMap = null;
+
+/**
+ * Opens the driver assignment modal for a pending booking.
+ * Fetches all active drivers with their GPS locations from Firestore,
+ * calculates distance to the booking destination, and recommends the nearest.
+ */
+async function openDriverAssignmentModal(bookingId, bookingData) {
+    // Get or create the modal
+    let modal = document.getElementById('driver-assign-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'driver-assign-modal';
+        document.body.appendChild(modal);
+    }
+
+    // Determine destination coordinates
+    let destLat = bookingData?.destLat || bookingData?.customLat || null;
+    let destLng = bookingData?.destLng || bookingData?.customLng || null;
+    let destName = bookingData?.destName || bookingData?.targetSite || 'Unknown Site';
+
+    // If no destLat/destLng, try to infer from targetSite
+    if (!destLat || !destLng) {
+        const site = DEMO_SITES.find(s => s.name === bookingData?.targetSite);
+        if (site) {
+            destLat = site.lat;
+            destLng = site.lng;
+            destName = site.name;
+        }
+    }
+
+    // Show loading state
+    modal.style.cssText = 'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:1rem;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);';
+    modal.innerHTML = `
+        <div style="background:#fff;border-radius:1.5rem;max-width:64rem;width:100%;max-height:92vh;overflow-y:auto;padding:2rem;box-shadow:0 25px 50px rgba(0,0,0,0.25);">
+            <div style="display:flex;align-items:center;justify-content:center;padding:4rem;">
+                <div style="text-align:center;">
+                    <span style="display:inline-block;width:32px;height:32px;border:3px solid rgba(28,28,28,0.15);border-top-color:#7A8C3E;border-radius:50%;animation:spin 1s linear infinite;"></span>
+                    <p style="margin-top:1rem;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#64748B;">Loading available drivers...</p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Fetch drivers with locations
+    const drivers = await getDriversWithLocations();
+
+    // Calculate distance for each driver (if they have a location and we have a destination)
+    const driversWithDistance = drivers.map(driver => {
+        let distanceKm = null;
+        if (driver.lastLocation && destLat && destLng) {
+            distanceKm = calculateDistance(
+                driver.lastLocation.lat,
+                driver.lastLocation.lng,
+                destLat,
+                destLng
+            );
+        }
+        return { ...driver, distanceKm };
+    });
+
+    // Sort by distance (nearest first), drivers without location at the end
+    driversWithDistance.sort((a, b) => {
+        if (a.distanceKm !== null && b.distanceKm !== null) return a.distanceKm - b.distanceKm;
+        if (a.distanceKm !== null) return -1;
+        if (b.distanceKm !== null) return 1;
+        return 0;
+    });
+
+    // Render the full modal
+    const bookingTimeStr = bookingData?.time || '';
+    const bookingDateStr = bookingData?.date || '';
+    const materialStr = bookingData?.material || '';
+
+    modal.innerHTML = `
+        <div style="background:#fff;border-radius:1.5rem;max-width:64rem;width:100%;max-height:92vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,0.25);">
+            <!-- Header -->
+            <div style="padding:2rem 2rem 0;display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                    <p style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;color:#7A8C3E;margin-bottom:0.5rem;">/ Smart Assignment</p>
+                    <h3 style="font-family:'Satoshi','Inter',sans-serif;font-size:24px;font-weight:900;color:#1C1C1C;letter-spacing:-0.03em;text-transform:uppercase;">SELECT DRIVER</h3>
+                </div>
+                <button id="close-assign-modal" style="width:40px;height:40px;border-radius:50%;border:1px solid rgba(28,28,28,0.1);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#64748B;transition:all 0.2s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='none'">
+                    <svg style="width:20px;height:20px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+
+            <!-- Booking Info Strip -->
+            <div style="margin:1.5rem 2rem;padding:1rem 1.25rem;background:#F7F8F5;border:1px solid rgba(28,28,28,0.06);display:flex;gap:2rem;flex-wrap:wrap;align-items:center;">
+                <div>
+                    <span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#64748B;">Destination</span>
+                    <p style="font-weight:800;color:#1C1C1C;font-size:14px;margin-top:2px;">${destName}</p>
+                </div>
+                ${bookingTimeStr ? `<div>
+                    <span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#64748B;">Time</span>
+                    <p style="font-weight:800;color:#1C1C1C;font-size:14px;margin-top:2px;">${bookingTimeStr}</p>
+                </div>` : ''}
+                ${materialStr ? `<div>
+                    <span style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#64748B;">Material</span>
+                    <p style="font-weight:800;color:#1C1C1C;font-size:14px;margin-top:2px;">${materialStr}</p>
+                </div>` : ''}
+            </div>
+
+            <!-- Content Grid -->
+            <div style="padding:0 2rem 2rem;display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;">
+                <!-- Driver List -->
+                <div style="max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:0.75rem;" id="driver-assignment-list">
+                    ${driversWithDistance.length === 0 ? `
+                        <div style="text-align:center;padding:3rem;">
+                            <span style="font-size:40px;display:block;margin-bottom:1rem;">🚫</span>
+                            <p style="font-weight:700;color:#1C1C1C;font-size:14px;">No Active Drivers</p>
+                            <p style="color:#64748B;font-size:12px;margin-top:0.5rem;">No approved drivers are currently available. Approve pending driver registrations first.</p>
+                        </div>
+                    ` : driversWithDistance.map((driver, idx) => {
+                        const isNearest = idx === 0 && driver.distanceKm !== null;
+                        const hasLocation = driver.lastLocation !== null;
+                        const distStr = driver.distanceKm !== null ? `${driver.distanceKm.toFixed(1)} km` : 'Location unavailable';
+                        const locationAge = hasLocation && driver.lastLocation.updatedAt?.toDate
+                            ? timeAgo(driver.lastLocation.updatedAt.toDate())
+                            : hasLocation ? 'Recently' : '—';
+
+                        return `
+                        <div class="driver-assign-card" data-uid="${driver.uid}" data-name="${driver.name}" data-mobile="${driver.mobile}" data-license="${driver.truckLicense}" 
+                             style="padding:1rem 1.25rem;border:${isNearest ? '2px solid #7A8C3E' : '1px solid rgba(28,28,28,0.1)'};background:${isNearest ? 'rgba(122,140,62,0.04)' : '#fff'};cursor:pointer;transition:all 0.2s;position:relative;"
+                             onmouseover="this.style.borderColor='#7A8C3E';this.style.transform='translateX(4px)'" 
+                             onmouseout="this.style.borderColor='${isNearest ? '#7A8C3E' : 'rgba(28,28,28,0.1)'}';this.style.transform='none'">
+                            ${isNearest ? `<span style="position:absolute;top:-8px;right:12px;background:#7A8C3E;color:#fff;padding:2px 10px;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;">⭐ Nearest</span>` : ''}
+                            <div style="display:flex;align-items:center;gap:1rem;">
+                                <div style="width:40px;height:40px;border-radius:50%;background:${hasLocation ? 'rgba(122,140,62,0.1)' : 'rgba(100,116,139,0.1)'};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                                    <span style="font-size:18px;">${hasLocation ? '📍' : '👤'}</span>
+                                </div>
+                                <div style="flex:1;min-width:0;">
+                                    <p style="font-weight:800;color:#1C1C1C;font-size:13px;text-transform:uppercase;letter-spacing:-0.01em;">${driver.name}</p>
+                                    <p style="font-size:10px;color:#64748B;margin-top:2px;">
+                                        ${driver.mobile ? `📱 ${driver.mobile}` : driver.email}
+                                        ${driver.truckLicense ? ` · <span style="color:#E05535;font-weight:700;">${driver.truckLicense}</span>` : ''}
+                                    </p>
+                                </div>
+                                <div style="text-align:right;flex-shrink:0;">
+                                    <p style="font-weight:800;color:${hasLocation ? '#7A8C3E' : '#94A3B8'};font-size:${hasLocation ? '16px' : '11px'};">${distStr}</p>
+                                    ${hasLocation ? `<p style="font-size:9px;color:#94A3B8;margin-top:2px;">Updated ${locationAge}</p>` : ''}
+                                </div>
+                            </div>
+                        </div>`;
+                    }).join('')}
+                </div>
+
+                <!-- Mini Map -->
+                <div style="display:flex;flex-direction:column;">
+                    <p style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;color:#64748B;margin-bottom:0.75rem;">/ Driver Positions</p>
+                    <div id="assign-mini-map" style="flex:1;min-height:380px;background:#F7F8F5;border:1px solid rgba(28,28,28,0.08);"></div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Bind close button
+    document.getElementById('close-assign-modal')?.addEventListener('click', () => {
+        closeDriverAssignmentModal();
+    });
+
+    // Click outside to close
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeDriverAssignmentModal();
+    });
+
+    // Bind driver card clicks
+    document.querySelectorAll('.driver-assign-card').forEach(card => {
+        card.addEventListener('click', async () => {
+            const driverName = card.dataset.name;
+            const driverMobile = card.dataset.mobile;
+            const driverLicense = card.dataset.license;
+
+            // Disable all cards
+            document.querySelectorAll('.driver-assign-card').forEach(c => {
+                c.style.pointerEvents = 'none';
+                c.style.opacity = '0.5';
+            });
+            card.style.opacity = '1';
+            card.style.border = '2px solid #7A8C3E';
+            card.innerHTML += `<div style="position:absolute;inset:0;background:rgba(122,140,62,0.08);display:flex;align-items:center;justify-content:center;"><span style="display:inline-block;width:20px;height:20px;border:2px solid rgba(28,28,28,0.15);border-top-color:#7A8C3E;border-radius:50%;animation:spin 1s linear infinite;"></span> <span style="margin-left:8px;font-size:11px;font-weight:700;color:#7A8C3E;">ASSIGNING...</span></div>`;
+
+            // Assign driver
+            const truckId = driverLicense || 'Pending';
+            const trackingToken = await assignDriverAndSendLink(bookingId, driverName, truckId);
+
+            // Build WhatsApp link
+            const link = `${window.location.origin}${window.location.pathname}?track_token=${trackingToken}`;
+            const cleanMobile = (driverMobile || '').replace(/[^0-9]/g, '');
+            const phoneForWA = cleanMobile.startsWith('91') ? cleanMobile : `91${cleanMobile}`;
+            const message = encodeURIComponent(
+                `Hi ${driverName},\n\nYou have been assigned a new construction delivery trip.\n📍 Destination: ${destName}\n📅 Date: ${bookingDateStr}\n⏰ Time: ${bookingTimeStr}\n🚧 Material: ${materialStr}\n\n🔗 Start Tracking: ${link}\n\n— LogiSafe Dispatch`
+            );
+            const waUrl = `https://wa.me/${phoneForWA}?text=${message}`;
+
+            // Show success and WhatsApp prompt
+            modal.querySelector('.driver-assign-card[data-uid="' + card.dataset.uid + '"]').innerHTML = `
+                <div style="display:flex;align-items:center;gap:1rem;padding:0.5rem;">
+                    <div style="width:40px;height:40px;border-radius:50%;background:rgba(122,140,62,0.15);display:flex;align-items:center;justify-content:center;">
+                        <svg style="width:20px;height:20px;color:#7A8C3E;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    </div>
+                    <div>
+                        <p style="font-weight:800;color:#7A8C3E;font-size:13px;">ASSIGNED: ${driverName}</p>
+                        <p style="font-size:10px;color:#64748B;margin-top:2px;">${driverLicense} · Tracking link generated</p>
+                    </div>
+                </div>
+            `;
+
+            // Open WhatsApp
+            if (confirm(`✅ ${driverName} assigned successfully!\n\nOpen WhatsApp to send the tracking link to ${driverMobile || 'driver'}?`)) {
+                window.open(waUrl, '_blank');
+            }
+
+            // Close modal and refresh bookings
+            setTimeout(async () => {
+                closeDriverAssignmentModal();
+                await loadAllBookings();
+            }, 1500);
+        });
+    });
+
+    // Initialize mini-map
+    setTimeout(() => {
+        initAssignmentMiniMap(driversWithDistance, destLat, destLng, destName);
+    }, 300);
+}
+
+/**
+ * Initialize the mini-map inside the driver assignment modal.
+ * Shows all driver positions and the booking destination.
+ */
+async function initAssignmentMiniMap(drivers, destLat, destLng, destName) {
+    const container = document.getElementById('assign-mini-map');
+    if (!container) return;
+
+    try {
+        await initMaps();
+    } catch (e) {
+        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;"><p style="color:#64748B;font-size:12px;">Map unavailable</p></div>';
+        return;
+    }
+
+    // Clean up old map
+    if (assignmentMap) { assignmentMap.remove(); assignmentMap = null; }
+
+    const center = destLat && destLng ? [destLat, destLng] : [MIRA_BHAYANDAR_CENTER.lat, MIRA_BHAYANDAR_CENTER.lng];
+
+    assignmentMap = L.map(container, {
+        center: center,
+        zoom: 13,
+        zoomControl: true,
+        attributionControl: false
+    });
+
+    L.tileLayer(STANDARD_TILE_URL, {
+        attribution: STANDARD_TILE_ATTRIBUTION,
+        maxZoom: 19
+    }).addTo(assignmentMap);
+
+    // Add destination marker
+    if (destLat && destLng) {
+        const destIcon = L.divIcon({
+            className: 'dest-marker',
+            html: `<div style="width:28px;height:28px;background:#7A8C3E;border:3px solid #fff;border-radius:50%;box-shadow:0 0 15px rgba(122,140,62,0.5);display:flex;align-items:center;justify-content:center;">
+                     <span style="font-size:12px;">🏗️</span>
+                   </div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+        });
+        L.marker([destLat, destLng], { icon: destIcon })
+            .addTo(assignmentMap)
+            .bindPopup(`<div style="font-family:Inter,sans-serif;padding:4px;"><strong style="font-size:12px;">📍 ${destName}</strong><br><span style="color:#7A8C3E;font-size:11px;font-weight:600;">DESTINATION</span></div>`);
+
+        // Add geofence circle
+        L.circle([destLat, destLng], {
+            radius: 500,
+            color: '#7A8C3E',
+            fillColor: '#7A8C3E',
+            fillOpacity: 0.08,
+            weight: 1,
+            dashArray: '6, 4'
+        }).addTo(assignmentMap);
+    }
+
+    // Add driver markers
+    const bounds = [];
+    if (destLat && destLng) bounds.push([destLat, destLng]);
+
+    drivers.forEach((driver, idx) => {
+        if (!driver.lastLocation) return;
+        const { lat, lng } = driver.lastLocation;
+        const isNearest = idx === 0;
+
+        const driverIcon = L.divIcon({
+            className: 'driver-map-marker',
+            html: `<div style="width:${isNearest ? '32' : '26'}px;height:${isNearest ? '32' : '26'}px;background:${isNearest ? '#E05535' : '#1C1C1C'};border:${isNearest ? '3px' : '2px'} solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,${isNearest ? '0.3' : '0.2'});">
+                     <span style="font-size:${isNearest ? '14' : '12'}px;">🚛</span>
+                   </div>`,
+            iconSize: [isNearest ? 32 : 26, isNearest ? 32 : 26],
+            iconAnchor: [isNearest ? 16 : 13, isNearest ? 16 : 13]
+        });
+
+        const distStr = driver.distanceKm !== null ? `${driver.distanceKm.toFixed(1)} km away` : '';
+
+        L.marker([lat, lng], { icon: driverIcon })
+            .addTo(assignmentMap)
+            .bindPopup(`<div style="font-family:Inter,sans-serif;padding:4px;">
+                <strong style="font-size:12px;">${driver.name}</strong>
+                ${isNearest ? '<br><span style="color:#E05535;font-size:10px;font-weight:700;">⭐ RECOMMENDED</span>' : ''}
+                ${distStr ? `<br><span style="color:#64748B;font-size:11px;">${distStr}</span>` : ''}
+                ${driver.truckLicense ? `<br><span style="color:#E05535;font-size:11px;font-weight:600;">${driver.truckLicense}</span>` : ''}
+            </div>`);
+
+        bounds.push([lat, lng]);
+    });
+
+    // Fit bounds to show all markers
+    if (bounds.length > 1) {
+        assignmentMap.fitBounds(bounds, { padding: [40, 40] });
+    }
+
+    setTimeout(() => assignmentMap.invalidateSize(), 200);
+}
+
+/**
+ * Close and cleanup the driver assignment modal.
+ */
+function closeDriverAssignmentModal() {
+    const modal = document.getElementById('driver-assign-modal');
+    if (modal) modal.remove();
+    if (assignmentMap) {
+        assignmentMap.remove();
+        assignmentMap = null;
     }
 }

@@ -1,9 +1,17 @@
 /**
- * tracking.js — Live Geolocation & 500m Geofencing Module (Realtime v2)
+ * tracking.js — Live Geolocation & 500m Geofencing Module (Realtime v3)
  *
+ * REAL GPS ONLY — No simulation, no fake movement.
+ * 
  * Provides start/stop tracking, distance computation via Haversine,
  * a geofence alert system when the driver approaches a site,
  * and a realtime listener for all active truck positions (for manager map).
+ *
+ * How it works for the Manager Map:
+ *  - Driver's watchPosition fires → processPosition writes {lat, lng} to Firestore
+ *  - Manager's onSnapshot listener picks up the new {lat, lng} instantly
+ *  - Manager map moves the truck marker to the new coordinates
+ *  - If driver stops moving → no new writes → marker stays still
  */
 
 import { calculateDistance } from '../utils/haversine.js';
@@ -17,8 +25,7 @@ const ACTIVE_TRUCKS_COLLECTION = 'activeTrucks';
 let watchId = null;
 let hasTriggeredGeofence = false;
 let destinationCoords = { lat: 19.2813, lng: 72.8808 };
-let simulationInterval = null;
-let currentTrackingId = null; // Store active session ID for cleanup
+let currentTrackingId = null;
 let lastLat = null;
 let lastLng = null;
 
@@ -38,9 +45,10 @@ export function getGeofenceRadius() {
 }
 
 /**
- * Start continuous GPS tracking.
+ * Start continuous GPS tracking using the device's real location.
+ * NO SIMULATION. If geolocation is unavailable, an error is reported.
  *
- * @param {string} driverId - Unique identifier for this driver session
+ * @param {string} driverId - Unique identifier for this driver session (Firebase UID)
  * @param {Function} onPositionUpdate - (distanceKm, lat, lng) => void
  * @param {Function} onGeofenceEnter - (distanceKm) => void — fires once when within 500m
  * @param {Function} onError - (errorMsg) => void
@@ -48,8 +56,6 @@ export function getGeofenceRadius() {
 export function startTracking(driverId, onPositionUpdate, onGeofenceEnter, onError) {
     if (!("geolocation" in navigator)) {
         if (onError) onError("Geolocation is not supported by this browser.");
-        // Fallback to simulation
-        startSimulation(driverId, onPositionUpdate, onGeofenceEnter);
         return;
     }
 
@@ -64,29 +70,30 @@ export function startTracking(driverId, onPositionUpdate, onGeofenceEnter, onErr
             await processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceEnter);
         },
         (err) => {
-            console.warn('Geolocation error, falling back to simulation:', err.message);
+            console.warn('Geolocation error:', err.message);
             if (onError) onError(err.message);
-            // Auto-start simulation as fallback
-            startSimulation(driverId, onPositionUpdate, onGeofenceEnter);
         },
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
     );
 }
 
 /**
- * Process a new GPS position — compute distance, sync, evaluate geofence.
+ * Process a new GPS position — compute distance, sync to Firestore, evaluate geofence.
+ *
+ * Jitter filter: ignores movements < 5 meters to avoid GPS drift while stationary.
+ * But the FIRST position is always processed immediately so the truck appears on the map right away.
  */
 async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceEnter) {
-    // Avoid jitter: Only process if movement is > 10 meters (0.01 km) or if it's the first ping
+    // Jitter filter: skip if moved < 5 meters (0.005 km), but always process first ping
     if (lastLat !== null && lastLng !== null) {
         const movedKm = calculateDistance(lastLat, lastLng, lat, lng);
-        if (movedKm < 0.01) return; // Haven't really moved
+        if (movedKm < 0.005) return; // Haven't really moved (GPS drift)
     }
 
     lastLat = lat;
     lastLng = lng;
 
-    // Sync to Firestore (best-effort)
+    // Sync real position to Firestore — this is what the Manager map reads
     try {
         const driverRef = doc(db, ACTIVE_TRUCKS_COLLECTION, driverId);
         await setDoc(driverRef, {
@@ -114,7 +121,7 @@ async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceE
             await addDoc(collection(db, 'live_alerts'), {
                 type: 'geofence_entry',
                 driverId: driverId,
-                title: `Arrving: ${driverId}`,
+                title: `Arriving: ${driverId}`,
                 detail: `Driver has entered the 500m geofence.`,
                 lat: lat,
                 lng: lng,
@@ -128,36 +135,7 @@ async function processPosition(driverId, lat, lng, onPositionUpdate, onGeofenceE
 }
 
 /**
- * Simulated tracking for demo/desktop usage.
- * Animates the truck approaching the destination progressively.
- */
-function startSimulation(driverId, onPositionUpdate, onGeofenceEnter) {
-    let simLat = destinationCoords.lat + 0.025; // ~2.5 km north
-    let simLng = destinationCoords.lng - 0.015;
-    const stepLat = 0.0012;
-    const stepLng = 0.0007;
-
-    simulationInterval = setInterval(async () => {
-        simLat -= stepLat;
-        simLng += stepLng;
-
-        // Add small random jitter for realism
-        const jitterLat = (Math.random() - 0.5) * 0.0002;
-        const jitterLng = (Math.random() - 0.5) * 0.0002;
-
-        await processPosition(
-            driverId,
-            simLat + jitterLat,
-            simLng + jitterLng,
-            onPositionUpdate,
-            onGeofenceEnter
-        );
-    }, 2000);
-}
-
-/**
- * Stop all tracking (both real and simulated).
- * Optionally removes the truck from the activeTrucks collection.
+ * Stop GPS tracking and clean up Firestore entry.
  * @param {string} [driverId] - If provided, removes the truck doc from Firestore
  */
 export async function stopTracking(driverId) {
@@ -166,10 +144,6 @@ export async function stopTracking(driverId) {
     if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
         watchId = null;
-    }
-    if (simulationInterval !== null) {
-        clearInterval(simulationInterval);
-        simulationInterval = null;
     }
     hasTriggeredGeofence = false;
     lastLat = null;
@@ -193,7 +167,7 @@ export async function stopTracking(driverId) {
  * Check if tracking is currently active.
  */
 export function isTrackingActive() {
-    return watchId !== null || simulationInterval !== null;
+    return watchId !== null;
 }
 
 // ─── REALTIME LISTENER: Active Trucks (for Manager Map) ─────────────────
@@ -201,6 +175,12 @@ export function isTrackingActive() {
 /**
  * Subscribe to real-time updates of all active truck positions from Firestore.
  * The manager's live map uses this to show/move/remove truck markers dynamically.
+ *
+ * How real-time movement works:
+ *  - Driver's GPS fires watchPosition → processPosition writes to Firestore
+ *  - This onSnapshot fires immediately with the new lat/lng
+ *  - reconcileTruckMarkers in manager-view.js moves the Leaflet marker
+ *  - If driver stops → no Firestore write → no snapshot → marker stays still
  *
  * @param {Function} callback - (trucks: Array<{ id, lat, lng, driverId, lastUpdate }>) => void
  * @returns {Function} unsubscribe function to stop listening
@@ -212,13 +192,13 @@ export function listenToActiveTrucks(callback) {
         const unsubscribe = onSnapshot(trucksRef, (snapshot) => {
             const trucks = [];
             const now = new Date();
-            const staleThresholdMs = 2 * 60 * 1000; // 2 minutes
+            const staleThresholdMs = 5 * 60 * 1000; // 5 minutes (was 2, increased for real GPS which may have gaps)
 
             snapshot.forEach((docSnap) => {
                 const data = docSnap.data();
                 const lastUpdate = data.lastUpdate?.toDate ? data.lastUpdate.toDate() : new Date();
                 
-                // Only include trucks updated within the last 2 minutes
+                // Only include trucks updated within the last 5 minutes
                 if (now - lastUpdate < staleThresholdMs) {
                     trucks.push({
                         id: docSnap.id,

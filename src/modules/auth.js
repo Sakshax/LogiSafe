@@ -16,7 +16,7 @@ import {
     createUserWithEmailAndPassword,
     signOut as fbSignOut,
     onAuthStateChanged,
-    collection, doc, setDoc, getDocs, query, where, orderBy, deleteDoc, Timestamp
+    collection, doc, setDoc, getDocs, query, where, orderBy, deleteDoc, Timestamp, onSnapshot
 } from '../config/firebase-config.js';
 
 // ─── Role Constants ─────────────────────────────────────────────────────
@@ -42,6 +42,34 @@ let authChangeCallback = null;
  */
 export function onAuthChange(cb) {
     authChangeCallback = cb;
+
+    onAuthStateChanged(auth, async (fbUser) => {
+        if (fbUser) {
+            const profile = await getUserProfile(fbUser.uid);
+            if (profile) {
+                currentUser = {
+                    uid: fbUser.uid,
+                    email: fbUser.email,
+                    displayName: profile.name || fbUser.email,
+                    mobile: profile.mobile,
+                    truckLicense: profile.truckLicense
+                };
+                currentRole = profile.role;
+                if (authChangeCallback) authChangeCallback(currentUser, currentRole);
+            } else if (fbUser.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+                currentUser = { uid: fbUser.uid, email: fbUser.email, displayName: 'Admin' };
+                currentRole = ROLES.ADMIN;
+                if (authChangeCallback) authChangeCallback(currentUser, currentRole);
+            } else {
+                await fbSignOut(auth);
+                if (authChangeCallback) authChangeCallback(null, null);
+            }
+        } else {
+            currentUser = null;
+            currentRole = null;
+            if (authChangeCallback) authChangeCallback(null, null);
+        }
+    });
 }
 
 // ─── LOGIN ──────────────────────────────────────────────────────────────
@@ -86,7 +114,9 @@ export async function loginWithEmail(email, password) {
         currentUser = {
             uid,
             email: cred.user.email,
-            displayName: userProfile.name || cred.user.email
+            displayName: userProfile.name || cred.user.email,
+            mobile: userProfile.mobile,
+            truckLicense: userProfile.truckLicense
         };
         currentRole = userProfile.role;
         if (authChangeCallback) authChangeCallback(currentUser, currentRole);
@@ -225,6 +255,32 @@ export async function getPendingDrivers() {
 }
 
 /**
+ * Subscribe to all pending driver registration requests in real-time.
+ * @param {Function} callback - (drivers) => void
+ * @returns {Function} unsubscribe function
+ */
+export function subscribeToPendingDrivers(callback) {
+    try {
+        const q = query(
+            collection(db, 'users'),
+            where('role', '==', ROLES.DRIVER),
+            where('status', '==', 'pending')
+        );
+        return onSnapshot(q, (snapshot) => {
+            const drivers = snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
+            callback(drivers);
+        }, (error) => {
+            console.warn('Pending drivers sub error:', error.message);
+            callback([]);
+        });
+    } catch (err) {
+        console.warn('Failed to subscribe to pending drivers:', err.message);
+        callback([]);
+        return () => {};
+    }
+}
+
+/**
  * Get all approved (active) drivers.
  * Used by the Manager booking form to populate the driver dropdown.
  * @returns {Promise<Array<{ uid, name, email }>>}
@@ -240,6 +296,47 @@ export async function getApprovedDrivers() {
         return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
     } catch (err) {
         console.warn('Failed to fetch approved drivers:', err.message);
+        return [];
+    }
+}
+
+/**
+ * Get all active drivers WITH their real-time GPS location.
+ * Returns drivers sorted by those who have a live location first.
+ * Used by the Admin when assigning drivers to bookings.
+ * @returns {Promise<Array<{ uid, name, email, mobile, truckLicense, lastLocation?: { lat, lng, accuracy, updatedAt } }>>}
+ */
+export async function getDriversWithLocations() {
+    try {
+        const q = query(
+            collection(db, 'users'),
+            where('role', '==', ROLES.DRIVER),
+            where('status', '==', 'active')
+        );
+        const snapshot = await getDocs(q);
+        const drivers = snapshot.docs.map(d => {
+            const data = d.data();
+            return {
+                uid: d.id,
+                name: data.name || 'Unnamed',
+                email: data.email || '',
+                mobile: data.mobile || '',
+                truckLicense: data.truckLicense || '',
+                lastLocation: data.lastLocation || null,
+                registeredAt: data.registeredAt
+            };
+        });
+
+        // Sort: drivers with live location first, then by name
+        drivers.sort((a, b) => {
+            if (a.lastLocation && !b.lastLocation) return -1;
+            if (!a.lastLocation && b.lastLocation) return 1;
+            return (a.name || '').localeCompare(b.name || '');
+        });
+
+        return drivers;
+    } catch (err) {
+        console.warn('Failed to fetch drivers with locations:', err.message);
         return [];
     }
 }
@@ -300,6 +397,28 @@ export async function getAllDrivers() {
     } catch (err) {
         console.warn('Failed to fetch drivers:', err.message);
         return [];
+    }
+}
+
+/**
+ * Subscribe to all drivers (any status) in real-time.
+ * @param {Function} callback - (drivers) => void
+ * @returns {Function} unsubscribe function
+ */
+export function subscribeToAllDrivers(callback) {
+    try {
+        const q = query(collection(db, 'users'), where('role', '==', ROLES.DRIVER));
+        return onSnapshot(q, (snapshot) => {
+            const drivers = snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
+            callback(drivers);
+        }, (error) => {
+            console.warn('All drivers sub error:', error.message);
+            callback([]);
+        });
+    } catch (err) {
+        console.warn('Failed to subscribe to all drivers:', err.message);
+        callback([]);
+        return () => {};
     }
 }
 

@@ -103,6 +103,9 @@ export function subscribeToBookings(date, callback) {
                     customAddress: data.customAddress || '',
                     customLat: data.customLat || null,
                     customLng: data.customLng || null,
+                    destLat: data.destLat || null,
+                    destLng: data.destLng || null,
+                    destName: data.destName || '',
                     createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
                 });
             });
@@ -157,6 +160,9 @@ export function subscribeToAllBookings(callback) {
                     customAddress: data.customAddress || '',
                     customLat: data.customLat || null,
                     customLng: data.customLng || null,
+                    destLat: data.destLat || null,
+                    destLng: data.destLng || null,
+                    destName: data.destName || '',
                     createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(),
                 });
             });
@@ -255,6 +261,9 @@ export async function bookDeliverySlot(booking) {
             customAddress: booking.customAddress || '',
             customLat: booking.customLat || null,
             customLng: booking.customLng || null,
+            destLat: booking.destLat || null,
+            destLng: booking.destLng || null,
+            destName: booking.destName || targetSite || '',
             status: status,
             createdAt: Timestamp.now()
         });

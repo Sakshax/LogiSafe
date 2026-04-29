@@ -203,8 +203,9 @@ function updateTruckCountIndicator(count) {
 /**
  * Reconcile the map markers with the latest truck positions from Firestore.
  * - Adds markers for new trucks
- * - Moves markers for existing trucks (smooth transition)
+ * - Moves markers for existing trucks to their REAL GPS position
  * - Removes markers for trucks that went offline
+ * - Draws a simple dashed line from truck position to destination
  */
 function reconcileTruckMarkers(trucks) {
     if (!managerMap) return;
@@ -226,6 +227,9 @@ function reconcileTruckMarkers(trucks) {
                 <div style="color:#666;font-size:11px;margin-bottom:4px">
                     Driver: ${truck.driver || 'Unknown'}
                 </div>
+                <div style="color:#94a3b8;font-size:10px;margin-bottom:4px">
+                    📍 ${truck.lat.toFixed(4)}, ${truck.lng.toFixed(4)}
+                </div>
                 <div style="display:flex;align-items:center;justify-content:between;border-top:1px solid #eee;padding-top:4px;margin-top:4px">
                     <span style="color:#059669;font-size:11px;font-weight:600">LIVE TRACKING</span>
                     <span style="color:#94a3b8;font-size:10px;margin-left:auto">${timeStr}</span>
@@ -233,8 +237,9 @@ function reconcileTruckMarkers(trucks) {
             </div>
         `;
 
-        // Update Marker
+        // Update existing marker or create new one
         if (truckMarkers[truck.id]) {
+            // Smoothly move marker to new real GPS position
             truckMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
             truckMarkers[truck.id].setPopupContent(popupContent);
         } else {
@@ -244,35 +249,36 @@ function reconcileTruckMarkers(trucks) {
             truckMarkers[truck.id] = marker;
         }
 
-        // Draw/Update routing path (polyline)
+        // Draw/Update a simple dashed line from truck's REAL position to destination
         if (truck.destLat && truck.destLng) {
-            const pathPoints = [
-                [truck.lat, truck.lng],
-                [truck.destLat, truck.destLng]
-            ];
-            
+            // Remove old line
             if (truckPaths[truck.id]) {
-                truckPaths[truck.id].setLatLngs(pathPoints);
-            } else {
-                truckPaths[truck.id] = L.polyline(pathPoints, {
+                try { managerMap.removeLayer(truckPaths[truck.id]); } catch(e) {}
+                delete truckPaths[truck.id];
+            }
+            
+            // Draw simple dashed polyline (no OSRM, no random routing)
+            truckPaths[truck.id] = L.polyline(
+                [[truck.lat, truck.lng], [truck.destLat, truck.destLng]],
+                {
                     color: '#7A8C3E',
                     weight: 3,
-                    opacity: 0.6,
-                    dashArray: '8, 8',
+                    opacity: 0.5,
+                    dashArray: '8, 6',
                     lineJoin: 'round'
-                }).addTo(managerMap);
-            }
+                }
+            ).addTo(managerMap);
         }
     });
 
-    // Cleanup markers and paths
+    // Cleanup markers and paths for trucks that went offline
     for (const id of Object.keys(truckMarkers)) {
         if (!currentIds.has(id)) {
             managerMap.removeLayer(truckMarkers[id]);
             delete truckMarkers[id];
             
             if (truckPaths[id]) {
-                managerMap.removeLayer(truckPaths[id]);
+                try { managerMap.removeLayer(truckPaths[id]); } catch(e) {}
                 delete truckPaths[id];
             }
         }
@@ -544,6 +550,10 @@ function bindBookingEvents() {
             
             bookingData.targetSite = site.name;
             bookingData.road = road;
+            // Pass actual destination coordinates for correct map routing
+            bookingData.destLat = site.lat;
+            bookingData.destLng = site.lng;
+            bookingData.destName = site.name;
         } else {
             const address = document.getElementById('bm-address').value;
             const lat = parseFloat(document.getElementById('bm-lat').value);
@@ -557,6 +567,10 @@ function bindBookingEvents() {
             bookingData.road = 'Public Road'; // Generic road for custom points
             bookingData.customLat = lat;
             bookingData.customLng = lng;
+            // Pass actual destination coordinates for correct map routing
+            bookingData.destLat = lat;
+            bookingData.destLng = lng;
+            bookingData.destName = address;
         }
 
         if (!date || !time) {

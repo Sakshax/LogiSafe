@@ -6,7 +6,7 @@
  */
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, addDoc, getDocs, query, where, orderBy, limit, onSnapshot, serverTimestamp, Timestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, getDoc, addDoc, getDocs, query, where, orderBy, limit, onSnapshot, serverTimestamp, Timestamp, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 import { getStorage, ref as storageRef, uploadBytesResumable, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-storage.js";
 
@@ -29,9 +29,9 @@ export const storage = getStorage(app);
 
 // ─── Re-export Firestore helpers so other modules stay clean ────────────
 export {
-    collection, doc, setDoc, addDoc, getDocs,
+    collection, doc, setDoc, getDoc, addDoc, getDocs,
     query, where, orderBy, limit,
-    onSnapshot, serverTimestamp, Timestamp, deleteDoc
+    onSnapshot, serverTimestamp, Timestamp, deleteDoc, updateDoc
 };
 
 // ─── Re-export Auth helpers ─────────────────────────────────────────────

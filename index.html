@@ -178,6 +178,48 @@
         .animate-spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* Intro Splash Screen Animation */
+        #splash-screen {
+            position: fixed;
+            inset: 0;
+            background: #FFFFFF;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.6s ease-in-out;
+        }
+        #splash-logo-container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            transform: scale(1.5);
+            transition: all 0.8s cubic-bezier(0.25, 1, 0.5, 1);
+        }
+        .splash-text {
+            font-size: 32px;
+            font-weight: 900;
+            color: #1C1C1C;
+            letter-spacing: -0.03em;
+            text-transform: uppercase;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+        /* When animating to header */
+        .splash-move-to-header {
+            opacity: 0 !important;
+            pointer-events: none;
+        }
+        .nav-main {
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.8s cubic-bezier(0.25, 1, 0.5, 1) 0.4s;
+        }
+        body.loaded .nav-main {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
         /* ── Color Utilities ──────────────────────────────── */
         .text-white { color: #FFFFFF; }
         .text-charcoal { color: #1C1C1C; }
@@ -204,6 +246,7 @@
         /* ── Responsive grid overrides ───────────────────── */
         @media (min-width: 640px) {
             .sm\:grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+            .sm\:p-10 { padding: 2.5rem; }
             .sm\:p-12 { padding: 3rem; }
         }
         @media (min-width: 768px) {
@@ -226,6 +269,29 @@
 </head>
 
 <body style="margin:0; padding:0; background:#FFFFFF; color:#1C1C1C; font-family:'Inter',sans-serif; -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; flex-direction:column;">
+
+    <!-- ═══ SPLASH SCREEN ═══ -->
+    <div id="splash-screen">
+        <div id="splash-logo-container">
+            <div style="width:56px;height:56px;border-radius:50%;background:#7A8C3E;display:flex;align-items:center;justify-content:center;">
+                <svg style="width:30px;height:30px;color:#fff;" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-5H17V9h2.29L21 11.5V13.5z"/>
+                </svg>
+            </div>
+            <h1 class="splash-text">LogiSafe</h1>
+        </div>
+    </div>
+    <script>
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                document.getElementById('splash-screen').classList.add('splash-move-to-header');
+                document.body.classList.add('loaded');
+                setTimeout(() => {
+                    document.getElementById('splash-screen').style.display = 'none';
+                }, 600);
+            }, 800);
+        });
+    </script>
 
     <!-- ══════════════════════════════════════════════════════════════════
          NAVBAR
@@ -869,6 +935,16 @@
                                 </div>
                             </div>
                         </div>
+                        <!-- Live Location Sharing Status -->
+                        <div style="background:#F7F8F5;border:1px solid rgba(28,28,28,0.08);padding:1.25rem;display:flex;align-items:center;gap:0.75rem;">
+                            <div style="width:32px;height:32px;border-radius:50%;background:rgba(122,140,62,0.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                                <span style="font-size:14px;">📡</span>
+                            </div>
+                            <div style="flex:1;">
+                                <p class="ui-label text-charcoal mb-1">/ Location Sharing</p>
+                                <p id="driver-location-status" style="font-size:11px;font-weight:600;color:#F4A623;">Initializing GPS...</p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -878,81 +954,130 @@
              VIEW 5: TEMPORARY TRACKING LINK (Mobile-Focused)
              ───────────────────────────────────────────────────────────── -->
         <section id="tracking-link-view" class="view-section hidden min-h-screen" style="background:#FFFFFF;">
-            <div class="flex items-center justify-between px-6 py-8" style="border-bottom:1px solid rgba(28,28,28,0.1);">
-                <div class="flex items-center gap-3">
-                    <span class="relative" style="display:inline-flex;">
-                        <span class="animate-ping absolute" style="width:8px;height:8px;border-radius:50%;background:#E05535;opacity:0.75;"></span>
-                        <span style="width:8px;height:8px;border-radius:50%;background:#E05535;position:relative;display:inline-block;"></span>
-                    </span>
-                    <span class="ui-label text-charcoal">Temporary Access Enabled</span>
+
+            <!-- ═══ DRIVER LOGIN GATE (shown first) ═══ -->
+            <div id="tracking-login-gate" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem;">
+                <div style="max-width:24rem;width:100%;">
+                    <!-- Logo -->
+                    <div class="text-center mb-10">
+                        <div style="width:56px;height:56px;border-radius:50%;background:#7A8C3E;display:inline-flex;align-items:center;justify-content:center;margin-bottom:1rem;">
+                            <svg style="width:28px;height:28px;color:#fff;" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-5H17V9h2.29L21 11.5V13.5z"/>
+                            </svg>
+                        </div>
+                        <h2 style="font-family:'Satoshi','Inter',sans-serif;font-size:24px;font-weight:900;color:#1C1C1C;text-transform:uppercase;letter-spacing:-0.03em;">LogiSafe</h2>
+                        <p class="ui-label text-olive mt-2">/ Driver Authentication</p>
+                        <p class="text-xs text-slate mt-3 leading-relaxed">Sign in with your registered driver account to start this delivery trip.</p>
+                    </div>
+
+                    <!-- Login Form -->
+                    <div class="space-y-4">
+                        <div>
+                            <label class="ui-label block mb-2">Email Address</label>
+                            <input type="email" id="track-login-email" class="auth-input" placeholder="driver@email.com" style="width:100%;">
+                        </div>
+                        <div>
+                            <label class="ui-label block mb-2">Password</label>
+                            <input type="password" id="track-login-password" class="auth-input" placeholder="••••••••" style="width:100%;">
+                        </div>
+                        <div id="track-login-status" class="hidden p-3 text-xs font-bold uppercase tracking-wider" style="background:rgba(224,85,53,0.06);color:#E05535;"></div>
+                        <button id="track-login-btn" class="btn-primary w-full py-5 text-sm">Sign In & Start Trip</button>
+                    </div>
+
+                    <p class="text-center text-xs text-slate mt-8" style="line-height:1.6;">Only approved driver accounts can access tracking links. Contact your admin if you don't have an account.</p>
                 </div>
-                <button id="close-tracking-btn" class="ui-label text-orange" style="background:none;border:none;cursor:pointer;border-bottom:1px solid #E05535;">EXIT TRIP</button>
             </div>
 
-            <div style="max-width:28rem;margin:0 auto;padding:1.5rem;" class="space-y-8">
-                <!-- Trip Destination -->
-                <div class="text-center py-4">
-                    <p class="ui-label text-olive mb-2">/ Active Destination</p>
-                    <h2 class="heading-lg uppercase leading-tight" id="driver-site-name">Mira Road East Construction</h2>
-                </div>
-
-                <!-- Status Card -->
-                <div style="border:1px solid rgba(28,28,28,0.08);padding:2rem;background:#F7F8F5;overflow:hidden;" class="space-y-8 relative">
-                    <div class="text-center">
-                        <h3 id="driver-status-text" style="font-size:36px;font-weight:800;color:#1C1C1C;text-transform:uppercase;font-style:italic;letter-spacing:-0.03em;">WAITING...</h3>
-                        <p class="ui-label text-slate mt-2">Current Logistics Status</p>
+            <!-- ═══ TRACKING UI (hidden until login) ═══ -->
+            <div id="tracking-main-ui" class="hidden">
+                <div class="flex items-center justify-between px-6 py-5" style="border-bottom:1px solid rgba(28,28,28,0.1);">
+                    <div class="flex items-center gap-3">
+                        <span class="relative" style="display:inline-flex;">
+                            <span class="animate-ping absolute" style="width:8px;height:8px;border-radius:50%;background:#7A8C3E;opacity:0.75;"></span>
+                            <span style="width:8px;height:8px;border-radius:50%;background:#7A8C3E;position:relative;display:inline-block;"></span>
+                        </span>
+                        <span class="ui-label text-charcoal">Live Tracking Active</span>
                     </div>
-
-                    <div class="grid grid-cols-2" style="gap:1px;background:rgba(28,28,28,0.08);border:1px solid rgba(28,28,28,0.08);">
-                        <div style="background:#FFFFFF;padding:1.5rem;" class="text-center">
-                            <span class="block ui-label text-slate mb-2">Estimated ETA</span>
-                            <span id="driver-eta-text" class="font-bold text-2xl text-charcoal">-- MIN</span>
-                        </div>
-                        <div style="background:#FFFFFF;padding:1.5rem;" class="text-center">
-                            <span class="block ui-label text-slate mb-2">Distance</span>
-                            <span id="driver-dist-text" class="font-bold text-2xl text-charcoal">-- KM</span>
-                        </div>
+                    <div class="flex items-center gap-4">
+                        <span id="tracking-driver-name" class="ui-label text-olive"></span>
+                        <button id="close-tracking-btn" class="ui-label text-orange" style="background:none;border:none;cursor:pointer;border-bottom:1px solid #E05535;">EXIT TRIP</button>
                     </div>
                 </div>
 
-                <!-- Tracking Button -->
-                <div class="flex-1 flex items-center justify-center p-12">
-                    <button id="start-tracking-btn" class="track-btn-outer flex items-center justify-center">
-                        <div class="track-btn-ring track-btn-ring-1 rounded-full"></div>
-                        <div class="track-btn-ring track-btn-ring-2 rounded-full"></div>
-                        <div class="track-btn-core">
-                            <svg id="tracking-btn-icon" style="width:40px;height:40px;margin-bottom:0.5rem;" fill="none" viewBox="0 0 24 24"
-                                stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round"
-                                    d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                                <path stroke-linecap="round" stroke-linejoin="round"
-                                    d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                <div style="max-width:32rem;margin:0 auto;padding:1.5rem;" class="space-y-6">
+                    <!-- Trip Destination -->
+                    <div class="text-center py-2">
+                        <p class="ui-label text-olive mb-2">/ Active Destination</p>
+                        <h2 class="heading-lg uppercase leading-tight" id="driver-site-name">Loading...</h2>
+                    </div>
+
+                    <!-- ═══ LIVE DRIVER MAP ═══ -->
+                    <div style="border:1px solid rgba(28,28,28,0.08);overflow:hidden;position:relative;">
+                        <div id="driver-live-map" style="height:280px;width:100%;background:#F7F8F5;"></div>
+                        <!-- GPS Status overlay on map -->
+                        <div id="gps-status-overlay" style="position:absolute;top:12px;left:12px;z-index:1000;background:rgba(255,255,255,0.95);padding:6px 12px;border:1px solid rgba(28,28,28,0.1);display:flex;align-items:center;gap:6px;">
+                            <span id="gps-dot" style="width:8px;height:8px;border-radius:50%;background:#F4A623;" class="animate-pulse"></span>
+                            <span class="ui-label" id="gps-status-label" style="font-size:9px;color:#F4A623;">ACQUIRING GPS...</span>
+                        </div>
+                    </div>
+
+                    <!-- Status + Metrics Card -->
+                    <div style="border:1px solid rgba(28,28,28,0.08);background:#F7F8F5;overflow:hidden;">
+                        <div class="text-center" style="padding:1.5rem;border-bottom:1px solid rgba(28,28,28,0.06);">
+                            <h3 id="driver-status-text" style="font-size:28px;font-weight:800;color:#1C1C1C;text-transform:uppercase;font-style:italic;letter-spacing:-0.03em;">CONNECTING GPS...</h3>
+                            <p class="ui-label text-slate mt-1">Current Status</p>
+                        </div>
+                        <div class="grid grid-cols-3" style="gap:1px;background:rgba(28,28,28,0.06);">
+                            <div style="background:#FFFFFF;padding:1.25rem;" class="text-center">
+                                <span class="block ui-label text-slate mb-1" style="font-size:9px;">ETA</span>
+                                <span id="driver-eta-text" class="font-bold text-xl text-charcoal">--</span>
+                                <span class="block ui-label text-slate" style="font-size:9px;">MIN</span>
+                            </div>
+                            <div style="background:#FFFFFF;padding:1.25rem;" class="text-center">
+                                <span class="block ui-label text-slate mb-1" style="font-size:9px;">DISTANCE</span>
+                                <span id="driver-dist-text" class="font-bold text-xl text-charcoal">--</span>
+                                <span class="block ui-label text-slate" style="font-size:9px;">KM</span>
+                            </div>
+                            <div style="background:#FFFFFF;padding:1.25rem;" class="text-center">
+                                <span class="block ui-label text-slate mb-1" style="font-size:9px;">SPEED</span>
+                                <span id="driver-speed-text" class="font-bold text-xl text-charcoal">0</span>
+                                <span class="block ui-label text-slate" style="font-size:9px;">KM/H</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Stop Button (only shows when tracking is active) -->
+                    <div id="stop-tracking-section" class="hidden">
+                        <button id="stop-tracking-btn" style="width:100%;padding:1.25rem;background:#E05535;color:#fff;border:none;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:0.75rem;transition:all 0.2s;">
+                            <svg style="width:18px;height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>
                             </svg>
-                            <span id="tracking-btn-label" class="ui-label text-white">READY</span>
+                            <span>I HAVE ARRIVED — STOP TRACKING</span>
+                        </button>
+                    </div>
+
+                    <!-- Compliance Section (locked by default) -->
+                    <div id="compliance-section"
+                        style="background:#FFFFFF;border:1px solid rgba(28,28,28,0.08);padding:2rem;opacity:0.4;pointer-events:none;transform:translateY(1rem);transition:all 0.5s ease-out;">
+                        <div class="flex items-center gap-3 mb-4">
+                            <p class="ui-label text-orange">/ Compliance Required</p>
                         </div>
-                    </button>
-                </div>
+                        <h4 class="heading-lg uppercase mb-2" style="font-size:18px;">Departing Verification</h4>
+                        <p id="compliance-instructions" class="text-xs text-slate mb-6 leading-relaxed">
+                            Upload a departing photo of the truck to verify green netting and dust mitigation protocols.
+                        </p>
 
-                <!-- Compliance Section (locked by default) -->
-                <div id="compliance-section"
-                    style="background:#FFFFFF;border-top:1px solid rgba(28,28,28,0.08);padding:2.5rem;opacity:0.4;pointer-events:none;transform:translateY(1rem);transition:all 0.5s ease-out;">
-                    <div class="flex items-center gap-3 mb-4">
-                        <p class="ui-label text-orange">/ Compliance Required</p>
+                        <input type="file" id="compliance-photo" accept="image/*" capture="environment" class="hidden">
+                        <button id="upload-photo-btn" class="btn-primary w-full py-5" style="font-size:10px;">
+                            TAKE DEPARTING PHOTO
+                        </button>
+
+                        <div id="upload-progress" class="hidden w-full" style="background:rgba(28,28,28,0.08);height:6px;margin-top:1.5rem;">
+                            <div id="upload-progress-bar" style="background:#7A8C3E;height:100%;transition:width 0.3s ease-out;width:0%;"></div>
+                        </div>
+                        <p id="upload-status-text" class="hidden ui-label text-olive mt-4 text-center"></p>
                     </div>
-                    <h4 class="heading-lg uppercase mb-2">Departing Verification</h4>
-                    <p id="compliance-instructions" class="text-xs text-slate mb-8 leading-relaxed">
-                        Upload a departing photo of the truck to verify green netting and dust mitigation protocols.
-                    </p>
-
-                    <input type="file" id="compliance-photo" accept="image/*" capture="environment" class="hidden">
-                    <button id="upload-photo-btn" class="btn-primary w-full py-5" style="font-size:10px;">
-                        TAKE DEPARTING PHOTO
-                    </button>
-
-                    <div id="upload-progress" class="hidden w-full" style="background:rgba(28,28,28,0.08);height:6px;margin-top:1.5rem;">
-                        <div id="upload-progress-bar" style="background:#7A8C3E;height:100%;transition:width 0.3s ease-out;width:0%;"></div>
-                    </div>
-                    <p id="upload-status-text" class="hidden ui-label text-olive mt-4 text-center"></p>
                 </div>
             </div>
         </section>

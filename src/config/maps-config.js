@@ -3,13 +3,14 @@
  *
  * 100% FREE — No API key required. No billing. No limits.
  * Uses Leaflet.js (open-source) with OpenStreetMap tiles.
+ * Includes Leaflet Routing Machine for road-following routes via OSRM.
  */
 
 let mapsReady = false;
 let mapsPromise = null;
 
 /**
- * Dynamically load Leaflet.js CSS + JS from CDN.
+ * Dynamically load Leaflet.js CSS + JS + Routing Machine from CDN.
  * @returns {Promise<void>}
  */
 export function initMaps() {
@@ -32,6 +33,12 @@ export function initMaps() {
         css.crossOrigin = '';
         document.head.appendChild(css);
 
+        // Load Leaflet Routing Machine CSS
+        const routingCss = document.createElement('link');
+        routingCss.rel = 'stylesheet';
+        routingCss.href = 'https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css';
+        document.head.appendChild(routingCss);
+
         // Load Leaflet JS
         const script = document.createElement('script');
         script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
@@ -43,13 +50,35 @@ export function initMaps() {
             const heatScript = document.createElement('script');
             heatScript.src = 'https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js';
             heatScript.onload = () => {
-                mapsReady = true;
-                resolve();
+                // Load Leaflet Routing Machine
+                const routingScript = document.createElement('script');
+                routingScript.src = 'https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js';
+                routingScript.onload = () => {
+                    mapsReady = true;
+                    resolve();
+                };
+                routingScript.onerror = () => {
+                    // Routing Machine is optional — maps still work without it
+                    console.warn('Leaflet Routing Machine failed to load, using fallback straight lines');
+                    mapsReady = true;
+                    resolve();
+                };
+                document.head.appendChild(routingScript);
             };
             heatScript.onerror = () => {
                 // Heatmap plugin is optional — maps still work without it
-                mapsReady = true;
-                resolve();
+                // Still load Routing Machine
+                const routingScript = document.createElement('script');
+                routingScript.src = 'https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js';
+                routingScript.onload = () => {
+                    mapsReady = true;
+                    resolve();
+                };
+                routingScript.onerror = () => {
+                    mapsReady = true;
+                    resolve();
+                };
+                document.head.appendChild(routingScript);
             };
             document.head.appendChild(heatScript);
         };
@@ -115,3 +144,80 @@ export function createTruckIcon() {
         popupAnchor: [0, -18]
     });
 }
+
+/**
+ * Create a driver marker icon (for driver location display on admin map)
+ */
+export function createDriverIcon() {
+    if (!window.L) return null;
+    return L.divIcon({
+        className: 'custom-driver-marker',
+        html: `<div style="width:28px;height:28px;background:#E05535;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(224,85,53,0.4)">
+                 <span style="font-size:14px">👤</span>
+               </div>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -16]
+    });
+}
+
+/**
+ * Add a road-following route between two points on the map using OSRM.
+ * Falls back to a straight dashed polyline if Routing Machine is unavailable.
+ *
+ * @param {L.Map} map - Leaflet map instance
+ * @param {[number, number]} start - [lat, lng] start point
+ * @param {[number, number]} end - [lat, lng] end point
+ * @param {Object} [options] - { color, weight, opacity, dashArray }
+ * @returns {Object} A control/layer object with a `.remove()` method
+ */
+export function addRoadRoute(map, start, end, options = {}) {
+    const color = options.color || '#7A8C3E';
+    const weight = options.weight || 4;
+    const opacity = options.opacity || 0.7;
+
+    // Try Leaflet Routing Machine (OSRM-based, road-following)
+    if (window.L && L.Routing && L.Routing.control) {
+        const routeControl = L.Routing.control({
+            waypoints: [
+                L.latLng(start[0], start[1]),
+                L.latLng(end[0], end[1])
+            ],
+            router: L.Routing.osrmv1({
+                serviceUrl: 'https://router.project-osrm.org/route/v1',
+                profile: 'driving'
+            }),
+            lineOptions: {
+                styles: [
+                    { color: color, opacity: opacity, weight: weight }
+                ],
+                addWaypoints: false,
+                missingRouteTolerance: 50
+            },
+            createMarker: () => null, // Don't add default markers (we have our own)
+            show: false,             // Don't show turn-by-turn instructions
+            addWaypoints: false,     // Don't allow adding intermediate waypoints
+            fitSelectedRoutes: false, // Don't auto-zoom to fit route
+            routeWhileDragging: false,
+            collapsible: false
+        }).addTo(map);
+
+        // Hide the routing instructions container that gets appended
+        setTimeout(() => {
+            const containers = map.getContainer().querySelectorAll('.leaflet-routing-container');
+            containers.forEach(el => { el.style.display = 'none'; });
+        }, 500);
+
+        return routeControl;
+    }
+
+    // Fallback: straight dashed polyline
+    return L.polyline([start, end], {
+        color,
+        weight: 3,
+        opacity: 0.6,
+        dashArray: '8, 8',
+        lineJoin: 'round'
+    }).addTo(map);
+}
+
