@@ -33,6 +33,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     if (trackToken) {
         // Show tracking view directly — it has its own login gate
+        const guestControls = $('guest-controls');
+        if (guestControls) guestControls.classList.add('hidden');
+        
         showView('tracking-link-view');
         initTrackingLinkView(trackToken);
         return;
@@ -170,23 +173,27 @@ function switchToTab(tab) {
         if (loginForm) loginForm.classList.remove('hidden');
         if (registerForm) registerForm.classList.add('hidden');
         if (tabLogin) {
-            tabLogin.classList.add('bg-blue-600', 'text-white', 'shadow-lg');
-            tabLogin.classList.remove('text-slate-400');
+            tabLogin.style.background = '#7A8C3E';
+            tabLogin.style.color = '#fff';
+            tabLogin.style.boxShadow = '0 4px 12px rgba(122,140,62,0.3)';
         }
         if (tabRegister) {
-            tabRegister.classList.remove('bg-blue-600', 'text-white', 'shadow-lg');
-            tabRegister.classList.add('text-slate-400');
+            tabRegister.style.background = 'transparent';
+            tabRegister.style.color = '#64748B';
+            tabRegister.style.boxShadow = 'none';
         }
     } else {
         if (loginForm) loginForm.classList.add('hidden');
         if (registerForm) registerForm.classList.remove('hidden');
         if (tabRegister) {
-            tabRegister.classList.add('bg-blue-600', 'text-white', 'shadow-lg');
-            tabRegister.classList.remove('text-slate-400');
+            tabRegister.style.background = '#7A8C3E';
+            tabRegister.style.color = '#fff';
+            tabRegister.style.boxShadow = '0 4px 12px rgba(122,140,62,0.3)';
         }
         if (tabLogin) {
-            tabLogin.classList.remove('bg-blue-600', 'text-white', 'shadow-lg');
-            tabLogin.classList.add('text-slate-400');
+            tabLogin.style.background = 'transparent';
+            tabLogin.style.color = '#64748B';
+            tabLogin.style.boxShadow = 'none';
         }
     }
 }
@@ -347,11 +354,11 @@ function showStatusMessage(elId, message, type) {
     const el = $(elId);
     if (!el) return;
     el.classList.remove('hidden');
-    el.className = `p-3 rounded-xl text-sm font-medium ${
-        type === 'success'
-            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-            : 'bg-red-500/10 text-red-400 border border-red-500/20'
-    }`;
+    if (type === 'success') {
+        el.style.cssText = 'padding:12px;border-radius:12px;font-size:13px;font-weight:500;background:rgba(122,140,62,0.1);color:#7A8C3E;border:1px solid rgba(122,140,62,0.2);';
+    } else {
+        el.style.cssText = 'padding:12px;border-radius:12px;font-size:13px;font-weight:500;background:rgba(224,85,53,0.1);color:#E05535;border:1px solid rgba(224,85,53,0.2);';
+    }
     el.textContent = message;
 }
 
@@ -390,27 +397,27 @@ function showToast(message, type = 'info') {
     if (!container) {
         container = document.createElement('div');
         container.id = 'toast-container';
-        container.className = 'fixed top-20 right-4 z-[100] space-y-2 pointer-events-none';
+        container.style.cssText = 'position:fixed;top:80px;right:16px;z-index:100;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
         document.body.appendChild(container);
     }
 
-    const typeConfig = {
-        success: { bg: 'bg-emerald-600/90', icon: '✓' },
-        error:   { bg: 'bg-red-600/90', icon: '✕' },
-        info:    { bg: 'bg-blue-600/90', icon: 'ℹ' },
-        warning: { bg: 'bg-amber-600/90', icon: '⚠' },
+    const colors = {
+        success: { bg: '#7A8C3E', icon: '✓' },
+        error:   { bg: '#E05535', icon: '✕' },
+        info:    { bg: '#1C1C1C', icon: 'ℹ' },
+        warning: { bg: '#F4A623', icon: '⚠' },
     };
-    const tc = typeConfig[type] || typeConfig.info;
+    const tc = colors[type] || colors.info;
 
     const toast = document.createElement('div');
-    toast.className = `${tc.bg} text-white px-5 py-3 rounded-xl shadow-2xl backdrop-blur-sm flex items-center gap-3 text-sm font-medium pointer-events-auto transform translate-x-full transition-transform duration-300 max-w-sm`;
-    toast.innerHTML = `<span class="flex-shrink-0 w-6 h-6 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">${tc.icon}</span><span>${message}</span>`;
+    toast.style.cssText = `background:${tc.bg};color:#fff;padding:10px 20px;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);backdrop-filter:blur(8px);display:flex;align-items:center;gap:10px;font-size:13px;font-weight:500;pointer-events:auto;transform:translateX(120%);transition:transform 0.3s ease;max-width:340px;`;
+    toast.innerHTML = `<span style="flex-shrink:0;width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">${tc.icon}</span><span>${message}</span>`;
 
     container.appendChild(toast);
-    requestAnimationFrame(() => toast.classList.remove('translate-x-full'));
+    requestAnimationFrame(() => { toast.style.transform = 'translateX(0)'; });
 
     setTimeout(() => {
-        toast.classList.add('translate-x-full');
+        toast.style.transform = 'translateX(120%)';
         setTimeout(() => toast.remove(), 300);
     }, 3500);
 }

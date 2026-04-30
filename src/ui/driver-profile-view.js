@@ -11,11 +11,14 @@
  */
 
 import { getUser } from '../modules/auth.js';
-import { db, doc, updateDoc, serverTimestamp } from '../config/firebase-config.js';
+import { db, doc, setDoc, serverTimestamp } from '../config/firebase-config.js';
+import { calculateDistance } from '../utils/haversine.js';
 
 let initialized = false;
 let locationWatchId = null;
 let locationUpdateInterval = null;
+let lastSharedLat = null;
+let lastSharedLng = null;
 
 export function initDriverProfileView() {
     if (initialized) return;
@@ -70,25 +73,34 @@ function startLocationSharing(driverUid) {
     locationWatchId = navigator.geolocation.watchPosition(
         async (position) => {
             const { latitude: lat, longitude: lng, accuracy } = position.coords;
+
+            // Jitter filter: only write if moved more than 10 meters
+            if (lastSharedLat !== null && lastSharedLng !== null) {
+                const movedKm = calculateDistance(lastSharedLat, lastSharedLng, lat, lng);
+                if (movedKm < 0.01) return; // < 10 meters, skip
+            }
+            lastSharedLat = lat;
+            lastSharedLng = lng;
             
             // Update Firestore user document with live location
+            // Uses setDoc with merge to handle first-time writes gracefully
             try {
                 const userRef = doc(db, 'users', driverUid);
-                await updateDoc(userRef, {
+                await setDoc(userRef, {
                     lastLocation: {
                         lat,
                         lng,
                         accuracy: Math.round(accuracy),
                         updatedAt: serverTimestamp()
                     }
-                });
+                }, { merge: true });
             } catch (e) {
                 console.warn('Failed to update driver location:', e.message);
             }
 
             // Update UI
             if (statusEl) {
-                statusEl.innerHTML = `<span style="color:#7A8C3E;">📍 Location sharing active</span> <span style="color:#94A3B8;font-size:9px;">(±${Math.round(accuracy)}m)</span>`;
+                statusEl.innerHTML = `<span style="color:#7A8C3E;">📍 Location sharing active</span> <span style="color:#94A3B8;font-size:9px;">(${lat.toFixed(4)}, ${lng.toFixed(4)} ±${Math.round(accuracy)}m)</span>`;
             }
         },
         (err) => {
@@ -112,14 +124,16 @@ function startLocationSharing(driverUid) {
                 const { latitude: lat, longitude: lng, accuracy } = position.coords;
                 try {
                     const userRef = doc(db, 'users', driverUid);
-                    await updateDoc(userRef, {
+                    await setDoc(userRef, {
                         lastLocation: {
                             lat,
                             lng,
                             accuracy: Math.round(accuracy),
                             updatedAt: serverTimestamp()
                         }
-                    });
+                    }, { merge: true });
+                    lastSharedLat = lat;
+                    lastSharedLng = lng;
                 } catch (e) { /* silent */ }
             },
             () => { /* silent */ },
@@ -140,4 +154,6 @@ function stopLocationSharing() {
         clearInterval(locationUpdateInterval);
         locationUpdateInterval = null;
     }
+    lastSharedLat = null;
+    lastSharedLng = null;
 }

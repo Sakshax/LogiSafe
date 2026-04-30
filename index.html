@@ -539,15 +539,6 @@
                         <button id="register-btn" class="btn-primary w-full py-5 text-sm">Create Account</button>
                     </div>
 
-                    <!-- Quick Demo Section -->
-                    <div class="mt-12 pt-8" style="border-top:1px solid rgba(28,28,28,0.1);">
-                        <p class="ui-label text-center mb-6">/ Rapid Access</p>
-                        <div class="grid grid-cols-3 gap-4">
-                            <button class="mock-login-btn" data-role="admin" style="border:1px solid rgba(28,28,28,0.1);padding:1rem;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:none;cursor:pointer;color:#1C1C1C;transition:all 0.2s;" onmouseover="this.style.background='#1C1C1C';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#1C1C1C'">Admin</button>
-                            <button class="mock-login-btn" data-role="manager" style="border:1px solid rgba(28,28,28,0.1);padding:1rem;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:none;cursor:pointer;color:#1C1C1C;transition:all 0.2s;" onmouseover="this.style.background='#1C1C1C';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#1C1C1C'">Manager</button>
-                            <button class="mock-login-btn" data-role="driver" style="border:1px solid rgba(28,28,28,0.1);padding:1rem;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:none;cursor:pointer;color:#1C1C1C;transition:all 0.2s;" onmouseover="this.style.background='#1C1C1C';this.style.color='#fff'" onmouseout="this.style.background='none';this.style.color='#1C1C1C'">Driver</button>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -797,18 +788,8 @@
                                         </div>
                                         <div>
                                             <label class="ui-label block mb-2">Time Slot</label>
-                                            <select id="bm-time" class="modal-input w-full">
-                                                <option value="07:00">07:00 AM</option>
-                                                <option value="08:00">08:00 AM</option>
-                                                <option value="09:00">09:00 AM</option>
-                                                <option value="10:00">10:00 AM</option>
-                                                <option value="11:00">11:00 AM</option>
-                                                <option value="12:00">12:00 PM</option>
-                                                <option value="13:00">01:00 PM</option>
-                                                <option value="14:00">02:00 PM</option>
-                                                <option value="15:00">03:00 PM</option>
-                                                <option value="16:00">04:00 PM</option>
-                                                <option value="17:00">05:00 PM</option>
+                                            <select id="bm-time" class="modal-input w-full" aria-describedby="bm-conflict-live">
+                                                <option value="">— Loading slots —</option>
                                             </select>
                                         </div>
                                     </div>
@@ -854,14 +835,19 @@
                             </div>
                         </div>
                         
+                        <!-- ═══ LIVE CONFLICT-DETECTION PILL ═══ -->
+                        <!-- This panel updates in real time as data changes in -->
+                        <!-- Firestore OR as the user picks a new road/date/time. -->
+                        <div id="bm-conflict-live" class="conflict-live mt-4" aria-live="polite"></div>
+
                         <!-- Conflict Warning -->
-                        <div class="flex items-start gap-3 p-4 rounded-2xl" style="background:rgba(244,166,35,0.06);border:1px solid rgba(244,166,35,0.12);">
+                        <div class="flex items-start gap-3 p-4" style="background:rgba(244,166,35,0.06);border:1px solid rgba(244,166,35,0.12);">
                             <span style="color:#F4A623;font-size:14px;margin-top:2px;">⚠</span>
-                            <p class="text-xs leading-relaxed" style="color:#957020;">The <strong>Conflict Detection Engine</strong> will verify road capacity before confirming. Narrow road sites allow only 1 truck per time window.</p>
+                            <p class="text-xs leading-relaxed" style="color:#957020;">The <strong>Conflict Detection Engine</strong> verifies road capacity in real time. Narrow road sites allow only 1 truck per 30-min window.</p>
                         </div>
 
                         <!-- Status message -->
-                        <div id="bm-status" class="hidden mt-4 p-3 rounded-md text-sm"></div>
+                        <div id="bm-status" class="hidden mt-4"></div>
 
                         <div class="mt-10 pt-6 flex justify-end items-center gap-4" style="border-top:1px solid rgba(28,28,28,0.05);">
                             <button id="bm-cancel-2" style="padding:0.875rem 1.5rem;color:#64748B;background:none;border:none;cursor:pointer;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;transition:all 0.2s;"

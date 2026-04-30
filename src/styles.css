@@ -1580,3 +1580,317 @@ select.auth-input {
         min-height: 250px !important;
     }
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   🚦 LIVE CONFLICT-DETECTION UI (Booking Modal)
+   The pill below the time selector updates in real time as the user
+   changes road / date / time, AND as Firestore pushes new bookings.
+   States: idle (no selection) · ok (slot free) · conflict (slot taken).
+   ══════════════════════════════════════════════════════════════════════ */
+
+.conflict-live {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid transparent;
+    background: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.45;
+    color: var(--color-text);
+    transition:
+        background 0.25s ease,
+        border-color 0.25s ease,
+        color 0.25s ease;
+    animation: conflictPillIn 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.conflict-live__icon {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 800;
+}
+.conflict-live__text {
+    flex: 1;
+    min-width: 0;
+}
+.conflict-live__text strong {
+    font-weight: 700;
+}
+.conflict-live__sub {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--color-muted);
+    font-weight: 500;
+}
+.conflict-live__live {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--color-primary);
+    padding: 0.25rem 0.55rem;
+    background: rgba(122, 140, 62, 0.10);
+    border: 1px solid rgba(122, 140, 62, 0.22);
+}
+.conflict-live__dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* — IDLE state — */
+.conflict-live--idle {
+    background: var(--color-surface);
+    border-color: var(--color-border);
+    color: var(--color-muted);
+}
+.conflict-live--idle .conflict-live__icon {
+    background: rgba(28, 28, 28, 0.06);
+    color: var(--color-muted);
+}
+
+/* — OK state (slot is free) — */
+.conflict-live--ok {
+    background: rgba(122, 140, 62, 0.06);
+    border-color: rgba(122, 140, 62, 0.24);
+    color: #5C6B2C;
+}
+.conflict-live--ok .conflict-live__icon {
+    background: var(--color-primary);
+    color: #fff;
+}
+
+/* — CONFLICT state — */
+.conflict-live--conflict {
+    background: rgba(224, 85, 53, 0.07);
+    border-color: rgba(224, 85, 53, 0.28);
+    color: #8a3220;
+}
+.conflict-live--conflict .conflict-live__icon {
+    background: var(--color-accent-1);
+    color: #fff;
+}
+
+.conflict-live__swap {
+    flex-shrink: 0;
+    background: var(--color-text);
+    color: #fff;
+    border: none;
+    padding: 0.6rem 1rem;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: transform 0.15s ease, background 0.2s ease;
+}
+.conflict-live__swap:hover {
+    background: var(--color-primary);
+}
+.conflict-live__swap:active {
+    transform: scale(0.97);
+}
+
+@keyframes conflictPillIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Disabled (occupied) <option>s in the time selector get a faded look
+   in browsers that allow option-styling (Firefox / Chromium desktop). */
+#bm-time option[disabled] {
+    color: #9aa3ad;
+    background: #f4f1ee;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   ⚠ CONFLICT-SUGGESTION CARD (race-condition fallback after Confirm)
+   Shown only when the engine reports a conflict at submit-time that
+   the live pill didn't catch (someone booked 0.5s before you did).
+   ══════════════════════════════════════════════════════════════════════ */
+
+.conflict-suggestion {
+    margin-top: 1rem;
+    border: 1px solid rgba(244, 166, 35, 0.30);
+    background: #fff;
+    overflow: hidden;
+    animation: conflictPillIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.conflict-suggestion__head {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.9rem 1.1rem;
+    background: rgba(224, 85, 53, 0.08);
+    border-bottom: 1px solid rgba(224, 85, 53, 0.15);
+}
+.conflict-suggestion__head-icon {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(224, 85, 53, 0.16);
+    color: var(--color-accent-1);
+    font-size: 14px;
+}
+.conflict-suggestion__title {
+    font-weight: 800;
+    font-size: 13px;
+    color: var(--color-accent-1-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0;
+}
+.conflict-suggestion__sub {
+    margin: 2px 0 0;
+    font-size: 12px;
+    color: var(--color-muted);
+}
+.conflict-suggestion__body {
+    padding: 1rem 1.1rem;
+    background: rgba(244, 166, 35, 0.04);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    justify-content: space-between;
+}
+.conflict-suggestion__next {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.conflict-suggestion__next-label {
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--color-muted);
+}
+.conflict-suggestion__next-time {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 900;
+    color: var(--color-primary);
+    letter-spacing: -0.02em;
+}
+.conflict-suggestion__actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+.conflict-suggestion__accept {
+    min-height: 44px;
+    padding: 0.7rem 1.2rem !important;
+    font-size: 11px !important;
+}
+.conflict-suggestion__reject {
+    background: transparent;
+    border: 1px solid rgba(28, 28, 28, 0.12);
+    color: var(--color-muted);
+    padding: 0.7rem 1rem;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+.conflict-suggestion__reject:hover {
+    color: var(--color-text);
+    border-color: var(--color-text);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   STATUS MESSAGES (booking modal success/error toast)
+   ══════════════════════════════════════════════════════════════════════ */
+
+.status-msg {
+    margin-top: 1rem;
+    padding: 0.85rem 1rem;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.5;
+    border: 1px solid transparent;
+    animation: conflictPillIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.status-msg.status-success {
+    background: rgba(122, 140, 62, 0.10);
+    border-color: rgba(122, 140, 62, 0.22);
+    color: #5C6B2C;
+}
+.status-msg.status-error {
+    background: rgba(224, 85, 53, 0.08);
+    border-color: rgba(224, 85, 53, 0.20);
+    color: #C4432A;
+}
+.status-msg.status-info {
+    background: var(--color-surface);
+    border-color: var(--color-border);
+    color: var(--color-text);
+}
+
+
+/* ── Spinner used in confirm/accept buttons ────────────────────────── */
+.btn-spinner {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+    margin-right: 0.5rem;
+    vertical-align: -2px;
+}
+.btn-primary.is-loading {
+    pointer-events: none;
+    opacity: 0.85;
+}
+
+
+/* ── Mobile tweaks for the conflict UI ─────────────────────────────── */
+@media (max-width: 768px) {
+    .conflict-live {
+        flex-wrap: wrap;
+    }
+    .conflict-live__live {
+        order: 3;
+        margin-left: auto;
+    }
+    .conflict-live__swap {
+        flex-basis: 100%;
+        text-align: center;
+        margin-top: 0.5rem;
+    }
+    .conflict-suggestion__body {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .conflict-suggestion__actions {
+        width: 100%;
+    }
+    .conflict-suggestion__accept {
+        flex: 1;
+    }
+}

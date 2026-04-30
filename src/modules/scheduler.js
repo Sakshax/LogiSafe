@@ -1,13 +1,16 @@
 /**
- * scheduler.js — Conflict Detection Engine v3 (Fully Realtime)
+ * scheduler.js — Conflict Detection Engine v4 (Fully Realtime)
  *
  * Implements "Critical Section" logic for narrow roads.
  * On conflict, calculates and returns the NEXT AVAILABLE 30-minute slot.
  * All bookings are persisted to Firestore with real-time subscriptions.
  * Local state kept as a synchronized cache from Firestore snapshots.
+ *
+ * v4: Added booking validation, past-date/time prevention, material persistence,
+ *     fixed updateBookingStatus dynamic import, improved cancelBooking.
  */
 
-import { db, collection, query, where, getDocs, addDoc, Timestamp, deleteDoc, doc, onSnapshot, orderBy } from '../config/firebase-config.js';
+import { db, collection, query, where, getDocs, addDoc, Timestamp, deleteDoc, doc, setDoc, onSnapshot, orderBy } from '../config/firebase-config.js';
 import { to12Hour, todayISO } from '../utils/formatters.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -26,7 +29,7 @@ let localBookings = [];
  * Generate all possible 30-minute time slots for the day.
  * @returns {string[]} e.g. ["07:00", "07:30", "08:00", ...]
  */
-function generateAllSlots() {
+export function generateAllSlots() {
     const slots = [];
     for (let h = DAY_START_HOUR; h < DAY_END_HOUR; h++) {
         slots.push(`${String(h).padStart(2, '0')}:00`);
@@ -36,41 +39,79 @@ function generateAllSlots() {
 }
 
 /**
+ * Build a lookup of every occupied time slot on a given road+date.
+ * Used by the manager-view UI to render real-time conflict feedback.
+ *
+ * @param {string} road
+ * @param {string} date - YYYY-MM-DD
+ * @returns {Map<string, Object>}  Map<"HH:MM", bookingObject>
+ */
+export function getOccupiedTimes(road, date) {
+    const map = new Map();
+    if (!road || !date) return map;
+    for (const b of localBookings) {
+        if (b.road === road && b.date === date) {
+            map.set(b.time, b);
+        }
+    }
+    return map;
+}
+
+/**
+ * Quickly tell whether a particular (road, date, time) tuple is in conflict.
+ * Pure function over the local cache (which is kept fresh by Firestore
+ * onSnapshot subscriptions). Returns the conflicting booking if any.
+ *
+ * @returns {{ conflict: boolean, booking?: Object }}
+ */
+export function checkConflict(road, date, time) {
+    const occupied = getOccupiedTimes(road, date);
+    const hit = occupied.get(time);
+    return hit ? { conflict: true, booking: hit } : { conflict: false };
+}
+
+/**
  * Find the next available 30-minute slot for a given road and date,
  * starting from the requested time.
+ *
+ * Behavior:
+ *  - If the requested time itself is FREE → returns that same time.
+ *  - Otherwise → walks forward through 30-min slots until a free one
+ *    is found, then wraps to the start of the day if nothing is free
+ *    after the requested time.
  *
  * @param {string} road
  * @param {string} date - YYYY-MM-DD
  * @param {string} requestedTime - "HH:MM"
- * @returns {{ found: boolean, time: string|null, display: string|null }}
+ * @returns {{ found: boolean, time: string|null, display: string|null, sameAsRequested?: boolean }}
  */
-function findNextAvailableSlot(road, date, requestedTime) {
+export function findNextAvailableSlot(road, date, requestedTime) {
     const allSlots = generateAllSlots();
-    const occupiedTimes = new Set(
-        localBookings
-            .filter(b => b.road === road && b.date === date)
-            .map(b => b.time)
-    );
+    const occupied = getOccupiedTimes(road, date);
 
-    // Find the index of the requested time (or the first slot after it)
     let startIdx = allSlots.findIndex(s => s >= requestedTime);
     if (startIdx === -1) startIdx = 0;
 
-    // Search forward from the NEXT slot after the requested one
+    if (!occupied.has(allSlots[startIdx])) {
+        return {
+            found: true,
+            time: allSlots[startIdx],
+            display: to12Hour(allSlots[startIdx]),
+            sameAsRequested: allSlots[startIdx] === requestedTime,
+        };
+    }
+
     for (let i = startIdx + 1; i < allSlots.length; i++) {
-        if (!occupiedTimes.has(allSlots[i])) {
+        if (!occupied.has(allSlots[i])) {
             return { found: true, time: allSlots[i], display: to12Hour(allSlots[i]) };
         }
     }
-
-    // If no forward slot found, wrap around from the beginning (before requested time)
     for (let i = 0; i < startIdx; i++) {
-        if (!occupiedTimes.has(allSlots[i])) {
+        if (!occupied.has(allSlots[i])) {
             return { found: true, time: allSlots[i], display: to12Hour(allSlots[i]) };
         }
     }
 
-    // Entire day fully booked
     return { found: false, time: null, display: null };
 }
 
@@ -100,6 +141,7 @@ export function subscribeToBookings(date, callback) {
                     time: data.time || '',
                     status: data.status || 'PENDING_ADMIN',
                     driver: data.driver || 'Pending Assignment',
+                    material: data.material || '',
                     customAddress: data.customAddress || '',
                     customLat: data.customLat || null,
                     customLng: data.customLng || null,
@@ -157,6 +199,7 @@ export function subscribeToAllBookings(callback) {
                     time: data.time || '',
                     status: data.status || 'PENDING_ADMIN',
                     driver: data.driver || 'Pending Assignment',
+                    material: data.material || '',
                     customAddress: data.customAddress || '',
                     customLat: data.customLat || null,
                     customLng: data.customLng || null,
@@ -208,6 +251,26 @@ export function subscribeToAllBookings(callback) {
 export async function bookDeliverySlot(booking) {
     const { truckId, targetSite, road, date, time, driver } = booking;
 
+    // ── Validate required fields ─────────────────────────────────────────
+    if (!road || !date || !time || !targetSite) {
+        return { success: false, status: 'error', message: 'Missing required booking fields (road, date, time, targetSite).' };
+    }
+
+    // ── Prevent past-date bookings ──────────────────────────────────────
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (date < todayStr) {
+        return { success: false, status: 'error', message: 'Cannot book delivery slots for past dates.' };
+    }
+
+    // ── Prevent past-time bookings (if booking for today) ─────────────
+    if (date === todayStr) {
+        const now = new Date();
+        const [hh, mm] = time.split(':').map(Number);
+        if (hh < now.getHours() || (hh === now.getHours() && mm <= now.getMinutes())) {
+            return { success: false, status: 'error', message: `Time slot ${to12Hour(time)} has already passed today.` };
+        }
+    }
+
     // ── Conflict Detection: same road + same date + same time ───────
     const conflict = localBookings.find(
         b => b.road === road && b.date === date && b.time === time
@@ -258,12 +321,14 @@ export async function bookDeliverySlot(booking) {
             truckId: truckId || 'Pending Assignment', 
             targetSite, road, date, time, 
             driver: driver || '',
+            material: booking.material || '',
             customAddress: booking.customAddress || '',
             customLat: booking.customLat || null,
             customLng: booking.customLng || null,
             destLat: booking.destLat || null,
             destLng: booking.destLng || null,
             destName: booking.destName || targetSite || '',
+            bookedBy: booking.bookedBy || '',
             status: status,
             createdAt: Timestamp.now()
         });
@@ -302,14 +367,19 @@ export async function bookDeliverySlot(booking) {
  * Cancel a booking by ID (removes from Firestore + local cache).
  */
 export async function cancelBooking(bookingId) {
+    if (!bookingId) return { success: false, error: 'No booking ID provided.' };
+
     // Remove locally
+    const existed = localBookings.some(b => b.id === bookingId);
     localBookings = localBookings.filter(b => b.id !== bookingId);
 
     // Remove from Firestore
     try {
         await deleteDoc(doc(db, BOOKINGS_COLLECTION, bookingId));
+        return { success: true };
     } catch (e) {
         console.warn('Could not delete from Firestore:', e.message);
+        return { success: existed, error: e.message };
     }
 }
 
@@ -329,13 +399,14 @@ export function getBookings({ date, targetSite, road } = {}) {
  * Update booking status in Firestore + local cache.
  */
 export async function updateBookingStatus(bookingId, status) {
+    if (!bookingId || !status) return null;
+
     const booking = localBookings.find(b => b.id === bookingId);
     if (booking) booking.status = status;
 
-    // Sync to Firestore
+    // Sync to Firestore using already-imported setDoc/doc
     try {
-        const { setDoc, doc: firestoreDoc } = await import('../config/firebase-config.js');
-        await setDoc(firestoreDoc(db, BOOKINGS_COLLECTION, bookingId), { status }, { merge: true });
+        await setDoc(doc(db, BOOKINGS_COLLECTION, bookingId), { status }, { merge: true });
     } catch (e) {
         console.warn('Could not update status in Firestore:', e.message);
     }
@@ -346,8 +417,7 @@ export async function updateBookingStatus(bookingId, status) {
 export async function assignDriverAndSendLink(bookingId, driver, truckId) {
     const trackingToken = btoa(`booking_${bookingId}`);
     try {
-        const { setDoc, doc: firestoreDoc } = await import('../config/firebase-config.js');
-        await setDoc(firestoreDoc(db, BOOKINGS_COLLECTION, bookingId), { 
+        await setDoc(doc(db, BOOKINGS_COLLECTION, bookingId), { 
             status: 'SCHEDULED', 
             driver: driver,
             truckId: truckId,

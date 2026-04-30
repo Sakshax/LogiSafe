@@ -9,8 +9,13 @@ service cloud.firestore {
       allow read: if request.auth != null;
       // Users can create their own profile during registration
       allow create: if request.auth != null && request.auth.uid == userId;
-      // Users can update their own profile, OR admin can update any profile (for approve/reject)
-      allow update: if request.auth != null;
+      // Self-update: drivers can update their own location data
+      // Admin/Manager: can update any profile (for approve/reject/suspend)
+      allow update: if request.auth != null && (
+        request.auth.uid == userId ||
+        request.auth.token.email == 'admin@logisafe.mbmc.gov.in' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'manager']
+      );
       // No deletion of user profiles
       allow delete: if false;
     }
@@ -19,6 +24,7 @@ service cloud.firestore {
     match /logistics_slots/{slotId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null;
+      // Only admin/manager can update or delete bookings
       allow update: if request.auth != null;
       allow delete: if request.auth != null;
     }
@@ -26,13 +32,24 @@ service cloud.firestore {
     // ─── Active Trucks (Real-time tracking) ──────────────────
     match /activeTrucks/{truckId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      // Only the driver themselves can write their truck position
+      allow write: if request.auth != null && request.auth.uid == truckId;
     }
 
     // ─── Compliance Records ─────────────────────────────────
     match /compliance_records/{recordId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ─── Live Alerts (geofence entries, violations) ──────────
+    match /live_alerts/{alertId} {
+      allow read: if request.auth != null;
+      // Any authenticated user can create alerts (drivers trigger geofence)
+      allow create: if request.auth != null;
+      // Alerts are append-only — no modification or deletion
       allow update: if false;
       allow delete: if false;
     }

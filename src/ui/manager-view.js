@@ -10,8 +10,15 @@
  *  - Live truck count indicator
  */
 
-import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION } from '../config/maps-config.js';
-import { bookDeliverySlot, subscribeToBookings } from '../modules/scheduler.js';
+import { initMaps, DARK_TILE_URL, DARK_TILE_ATTRIBUTION, DEMO_SITES, createSiteIcon, createTruckIcon, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION, addRoadRoute } from '../config/maps-config.js';
+import {
+    bookDeliverySlot,
+    subscribeToBookings,
+    generateAllSlots,
+    getOccupiedTimes,
+    findNextAvailableSlot,
+    checkConflict,
+} from '../modules/scheduler.js';
 import { listenToActiveTrucks } from '../modules/tracking.js';
 import { getApprovedDrivers } from '../modules/auth.js';
 import { to12Hour, todayISO, timeAgo } from '../utils/formatters.js';
@@ -35,10 +42,18 @@ let approvedDriversCache = [];
 // Realtime subscription unsubscribers
 let unsubscribeBookings = null;
 let unsubscribeTrucks = null;
+let unsubscribeAlerts = null;
+
+// Realtime subscription used while the booking modal is open. Keyed by
+// the date currently selected inside the modal so we can swap when the
+// user changes the date picker.
+let unsubscribeBookingModalDate = null;
+let modalSubscribedDate = null;
 
 // Map marker dictionary for live trucks { truckId: L.marker }
 let truckMarkers = {};
-let truckPaths = {}; // Store routing polylines
+let truckPaths = {}; // Store routing polylines/controls
+let truckDestCircles = {}; // Dynamic geofence circles per truck destination
 
 export async function initManagerView() {
     if (initialized) return;
@@ -68,6 +83,15 @@ export function destroyManagerView() {
         unsubscribeTrucks();
         unsubscribeTrucks = null;
     }
+    if (unsubscribeAlerts) {
+        unsubscribeAlerts();
+        unsubscribeAlerts = null;
+    }
+    if (unsubscribeBookingModalDate) {
+        unsubscribeBookingModalDate();
+        unsubscribeBookingModalDate = null;
+        modalSubscribedDate = null;
+    }
 
     // Clean up map
     if (managerMap) {
@@ -76,6 +100,8 @@ export function destroyManagerView() {
     }
 
     truckMarkers = {};
+    truckPaths = {};
+    truckDestCircles = {};
     initialized = false;
     pendingBooking = null;
 }
@@ -115,6 +141,7 @@ function renderSchedule(bookings) {
     }
 
     const statusConfig = {
+        'PENDING_ADMIN': { text: 'text-[#E05535]', dot: 'bg-[#E05535]', label: 'Pending' },
         'SCHEDULED': { text: 'text-[#7A8C3E]', dot: 'bg-[#7A8C3E]', label: 'Scheduled' },
         'EN_ROUTE':  { text: 'text-[#F4A623]', dot: 'bg-[#F4A623]', label: 'En Route' },
         'ARRIVED':   { text: 'text-[#1C1C1C]', dot: 'bg-[#1C1C1C]', label: 'Arrived' },
@@ -124,6 +151,8 @@ function renderSchedule(bookings) {
     container.innerHTML = bookings.map((b, i) => {
         const sc = statusConfig[b.status] || statusConfig['SCHEDULED'];
         const timeStr = to12Hour(b.time);
+        const isCustom = b.targetSite === '(Custom Location)' || !!b.customAddress;
+        const destDisplay = b.destName || b.customAddress || b.targetSite || 'Unknown';
         return `
         <div class="flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-300" style="animation-delay: ${i * 60}ms">
             <div class="w-16 text-center border-r border-[#1C1C1C]/10 pr-6">
@@ -131,14 +160,13 @@ function renderSchedule(bookings) {
                 <p class="text-[9px] font-bold text-[#64748B] uppercase">${timeStr.split(' ')[1]}</p>
             </div>
             <div class="flex-1 min-w-0">
-                <p class="ui-label text-[#7A8C3E] mb-1">/ Tracking Active</p>
-                <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${b.truckId}</p>
-                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${b.road}</p>
-                ${b.material ? `
-                    <div class="mt-2 flex">
-                        <span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>
-                    </div>
-                ` : ''}
+                <p class="ui-label text-[#7A8C3E] mb-1">/ ${isCustom ? '📌 Custom Delivery' : 'Tracking Active'}</p>
+                <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${b.truckId || 'Pending Assignment'}</p>
+                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${destDisplay}</p>
+                <div class="mt-2 flex flex-wrap gap-1">
+                    ${b.material ? `<span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>` : ''}
+                    ${isCustom ? `<span class="px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-widest border" style="background:rgba(224,85,53,0.06);color:#E05535;border-color:rgba(224,85,53,0.15);">📌 Custom Point</span>` : ''}
+                </div>
             </div>
             <div class="flex items-center gap-2">
                 <span class="w-1.5 h-1.5 rounded-full ${sc.dot} ${b.status === 'EN_ROUTE' ? 'animate-pulse' : ''}"></span>
@@ -159,12 +187,9 @@ function startRealtimeTruckTracking() {
     });
 
     // Realtime Manager Alerts for Geofence
-    try {
-        const { collection, onSnapshot } = window.firebaseFirestoreVars || {}; // If not available, we use direct import
-    } catch(e){}
     import('../config/firebase-config.js').then(({ db, collection, onSnapshot }) => {
         let isInitialLoad = true;
-        onSnapshot(collection(db, 'live_alerts'), (snapshot) => {
+        unsubscribeAlerts = onSnapshot(collection(db, 'live_alerts'), (snapshot) => {
             if (isInitialLoad) { isInitialLoad = false; return; } // Skip historical alerts
             
             snapshot.docChanges().forEach((change) => {
@@ -249,37 +274,88 @@ function reconcileTruckMarkers(trucks) {
             truckMarkers[truck.id] = marker;
         }
 
-        // Draw/Update a simple dashed line from truck's REAL position to destination
+        // Draw/Update road-following route from truck to destination
         if (truck.destLat && truck.destLng) {
-            // Remove old line
+            // Remove old route
             if (truckPaths[truck.id]) {
+                try { truckPaths[truck.id].remove(); } catch(e) {}
                 try { managerMap.removeLayer(truckPaths[truck.id]); } catch(e) {}
                 delete truckPaths[truck.id];
             }
             
-            // Draw simple dashed polyline (no OSRM, no random routing)
-            truckPaths[truck.id] = L.polyline(
-                [[truck.lat, truck.lng], [truck.destLat, truck.destLng]],
-                {
+            // Draw road-following route via OSRM (falls back to straight line)
+            truckPaths[truck.id] = addRoadRoute(
+                managerMap,
+                [truck.lat, truck.lng],
+                [truck.destLat, truck.destLng],
+                { color: '#7A8C3E', weight: 4, opacity: 0.6 }
+            );
+
+            // Draw dynamic geofence circle around destination (if not already drawn for this dest)
+            const destKey = `${truck.destLat.toFixed(4)}_${truck.destLng.toFixed(4)}`;
+            if (!truckDestCircles[destKey]) {
+                truckDestCircles[destKey] = L.circle([truck.destLat, truck.destLng], {
+                    radius: 500,
                     color: '#7A8C3E',
-                    weight: 3,
-                    opacity: 0.5,
-                    dashArray: '8, 6',
-                    lineJoin: 'round'
-                }
-            ).addTo(managerMap);
+                    fillColor: '#7A8C3E',
+                    fillOpacity: 0.08,
+                    weight: 1,
+                    dashArray: '6, 4'
+                }).addTo(managerMap);
+            }
+
+            // Dynamic destination marker for custom points (standard sites already have markers from initLiveMap)
+            const isStandardSite = DEMO_SITES.some(s => Math.abs(s.lat - truck.destLat) < 0.001 && Math.abs(s.lng - truck.destLng) < 0.001);
+            const destMarkerKey = `dest_${destKey}`;
+            if (!isStandardSite && !truckMarkers[destMarkerKey]) {
+                const destIcon = L.divIcon({
+                    className: 'dest-pin-custom',
+                    html: `<div style="width:22px;height:22px;background:#E05535;border:3px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(224,85,53,0.4);display:flex;align-items:center;justify-content:center;">
+                             <div style="width:5px;height:5px;background:#fff;border-radius:50%;"></div>
+                           </div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11]
+                });
+                truckMarkers[destMarkerKey] = L.marker([truck.destLat, truck.destLng], { icon: destIcon })
+                    .addTo(managerMap)
+                    .bindPopup(`<div style="font-family:Inter,sans-serif;padding:4px;"><strong style="font-size:12px;">📌 Custom Destination</strong><br><span style="color:#E05535;font-size:11px;font-weight:600;">Driver: ${truck.driver || 'Unknown'}</span></div>`);
+            }
         }
     });
 
-    // Cleanup markers and paths for trucks that went offline
+    // Cleanup markers, paths, and circles for trucks that went offline
     for (const id of Object.keys(truckMarkers)) {
-        if (!currentIds.has(id)) {
+        if (!currentIds.has(id) && !id.startsWith('dest_')) {
             managerMap.removeLayer(truckMarkers[id]);
             delete truckMarkers[id];
             
             if (truckPaths[id]) {
+                try { truckPaths[id].remove(); } catch(e) {}
                 try { managerMap.removeLayer(truckPaths[id]); } catch(e) {}
                 delete truckPaths[id];
+            }
+        }
+    }
+
+    // Clean up geofence circles and destination markers that no longer have any active truck headed to them
+    const activeDestKeys = new Set();
+    trucks.forEach(t => {
+        if (t.destLat && t.destLng) {
+            activeDestKeys.add(`${t.destLat.toFixed(4)}_${t.destLng.toFixed(4)}`);
+        }
+    });
+    for (const key of Object.keys(truckDestCircles)) {
+        if (!activeDestKeys.has(key)) {
+            try { managerMap.removeLayer(truckDestCircles[key]); } catch(e) {}
+            delete truckDestCircles[key];
+        }
+    }
+    for (const key of Object.keys(truckMarkers)) {
+        if (key.startsWith('dest_')) {
+            const coordKey = key.replace('dest_', '');
+            if (!activeDestKeys.has(coordKey)) {
+                try { managerMap.removeLayer(truckMarkers[key]); } catch(e) {}
+                delete truckMarkers[key];
             }
         }
     }
@@ -328,15 +404,8 @@ async function initLiveMap() {
         `);
     });
 
-    // 500m geofence circle around primary site
-    L.circle([selectedSite.lat, selectedSite.lng], {
-        radius: 500,
-        color: '#7A8C3E',
-        fillColor: '#7A8C3E',
-        fillOpacity: 0.1,
-        weight: 1,
-        dashArray: '6, 4'
-    }).addTo(managerMap);
+    // Geofence circles are drawn dynamically when active trucks appear
+    // (see reconcileTruckMarkers) — no hardcoded circle here.
 
     setTimeout(() => managerMap.invalidateSize(), 200);
 }
@@ -437,43 +506,64 @@ async function updatePinnedLocation(lat, lng) {
     }
 }
 
-// ─── Booking Modal ──────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+//  BOOKING MODAL — REAL-TIME CONFLICT DETECTION
+//  Subscribes to bookings for the chosen date the moment the modal opens
+//  and re-renders the time selector + conflict pill on every keystroke,
+//  every Firestore snapshot, and every site/date change.
+// ════════════════════════════════════════════════════════════════════════
+
 function bindBookingEvents() {
-    const modal = document.getElementById('booking-modal');
-    const openBtn = document.getElementById('new-booking-btn');
+    const modal     = document.getElementById('booking-modal');
+    const openBtn   = document.getElementById('new-booking-btn');
     const cancelBtn = document.getElementById('bm-cancel');
     const confirmBtn = document.getElementById('bm-confirm');
     const dateInput = document.getElementById('bm-date');
-    const statusEl = document.getElementById('bm-status');
-
+    const timeInput = document.getElementById('bm-time');
+    const siteSelect = document.getElementById('bm-site');
     if (!openBtn) return;
 
-    // Set default date
     if (dateInput) dateInput.value = todayISO();
 
-    // Populate site select
-    const siteSelect = document.getElementById('bm-site');
     if (siteSelect) {
         siteSelect.innerHTML = DEMO_SITES.map(s =>
             `<option value="${s.id}" data-road="${s.road}">${s.name}</option>`
         ).join('');
     }
 
+    // ── Open modal: hydrate + start realtime conflict tracking ──────
     openBtn.addEventListener('click', () => {
         modal.classList.remove('hidden');
         modal.classList.add('flex');
         clearConflictUI();
-        if (statusEl) { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
+        rebuildTimeSelector();
+        startBookingModalSubscription();
+        refreshConflictPill();
     });
 
-    // Pin on Map Button (Now triggers/refreshes the mini-map)
+    // ── Re-render conflict UI whenever ANY booking input changes ────
+    const reactiveInputs = ['bm-date', 'bm-time', 'bm-site', 'bm-location-mode'];
+    reactiveInputs.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const handler = () => {
+            if (id === 'bm-date') startBookingModalSubscription();
+            // Don't rebuild the <select> while the user is inside it —
+            // that would cause flicker. Time changes only affect the pill.
+            if (id !== 'bm-time') rebuildTimeSelector();
+            refreshConflictPill();
+        };
+        el.addEventListener('change', handler);
+        el.addEventListener('input', handler);
+    });
+
+    // ── Pin-on-map button ───────────────────────────────────────────
     const pinBtn = document.getElementById('bm-pin-btn');
     if (pinBtn) {
         pinBtn.addEventListener('click', () => {
             initMiniMap().then(() => {
                 if (miniMap) {
                     miniMap.invalidateSize();
-                    // Center on current site if not pinned yet
                     if (!document.getElementById('bm-lat').value) {
                          miniMap.setView([selectedSite.lat, selectedSite.lng], 13);
                          miniMapMarker.setLatLng([selectedSite.lat, selectedSite.lng]);
@@ -481,28 +571,28 @@ function bindBookingEvents() {
                     }
                 }
             });
-            pinBtn.classList.add('hidden'); // Hide the button once map is shown
+            pinBtn.classList.add('hidden');
         });
     }
 
-    // Modal Mode Switching
+    // ── Location-mode toggle (Standard Site ↔ Custom Point) ─────────
     document.querySelectorAll('.location-mode-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const mode = btn.dataset.mode;
             const modeInput = document.getElementById('bm-location-mode');
             if (modeInput) modeInput.value = mode;
-            
-            // UI styles
+
             document.querySelectorAll('.location-mode-btn').forEach(b => {
                 b.style.border = '1px solid rgba(28,28,28,0.1)';
                 b.style.background = 'transparent';
                 b.style.color = '#64748B';
+                b.classList.remove('is-selected');
             });
             btn.style.border = '1px solid #7A8C3E';
-            btn.style.background = 'rgba(122,140,62,0.06)';
+            btn.style.background = 'rgba(122,140,62,0.08)';
             btn.style.color = '#1C1C1C';
+            btn.classList.add('is-selected');
 
-            // Toggle containers
             const siteCont = document.getElementById('site-selector-container');
             const customCont = document.getElementById('custom-location-container');
             if (mode === 'site') {
@@ -511,222 +601,340 @@ function bindBookingEvents() {
             } else {
                 siteCont?.classList.add('hidden');
                 customCont?.classList.remove('hidden');
-                // Auto-init map if custom point selected
                 if (!miniMap) pinBtn?.click();
             }
+            // Road just changed → re-evaluate conflicts immediately.
+            rebuildTimeSelector();
+            refreshConflictPill();
         });
     });
 
-    cancelBtn.addEventListener('click', () => {
+    const closeModal = () => {
         modal.classList.add('hidden');
         modal.classList.remove('flex');
         clearConflictUI();
         cleanupBookingModal();
-    });
+        stopBookingModalSubscription();
+    };
+    cancelBtn.addEventListener('click', closeModal);
+    document.getElementById('bm-cancel-2')?.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) {
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            clearConflictUI();
-            cleanupBookingModal();
-        }
-    });
-
+    // ── Confirm: with realtime detection this should rarely conflict
+    //    (the user already saw the green pill), but keep server-side
+    //    double-check via the engine. ────────────────────────────────
     confirmBtn.addEventListener('click', async () => {
-        const modeInput = document.getElementById('bm-location-mode');
-        const mode = modeInput ? modeInput.value : 'site';
-        const date = dateInput.value;
-        const time = document.getElementById('bm-time').value;
-        const material = document.getElementById('bm-material').value;
+        const bookingData = collectBookingFormData();
+        if (!bookingData) return;
 
-        let bookingData = { date, time, material };
-
-        if (mode === 'site') {
-            const siteOpt = siteSelect.options[siteSelect.selectedIndex];
-            const targetSite = siteOpt.value;
-            const road = siteOpt.dataset.road;
-            const site = DEMO_SITES.find(s => s.id === targetSite);
-            
-            bookingData.targetSite = site.name;
-            bookingData.road = road;
-            // Pass actual destination coordinates for correct map routing
-            bookingData.destLat = site.lat;
-            bookingData.destLng = site.lng;
-            bookingData.destName = site.name;
-        } else {
-            const address = document.getElementById('bm-address').value;
-            const lat = parseFloat(document.getElementById('bm-lat').value);
-            const lng = parseFloat(document.getElementById('bm-lng').value);
-
-            if (!address) { alert('Please enter delivery address'); return; }
-            if (isNaN(lat)) { alert('Please pin the location on the map'); return; }
-
-            bookingData.targetSite = '(Custom Location)';
-            bookingData.customAddress = address;
-            bookingData.road = 'Public Road'; // Generic road for custom points
-            bookingData.customLat = lat;
-            bookingData.customLng = lng;
-            // Pass actual destination coordinates for correct map routing
-            bookingData.destLat = lat;
-            bookingData.destLng = lng;
-            bookingData.destName = address;
-        }
-
+        const { date, time } = bookingData;
         if (!date || !time) {
-            showBookingStatus('Please fill in all required fields.', 'error');
+            showBookingStatus('Please fill in date and time.', 'error');
             return;
         }
 
         confirmBtn.disabled = true;
-        confirmBtn.innerHTML = '<span class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>';
-        clearConflictUI();
+        confirmBtn.classList.add('is-loading');
+        confirmBtn.innerHTML = '<span class="btn-spinner"></span><span>Booking…</span>';
 
         const result = await bookDeliverySlot(bookingData);
 
         confirmBtn.disabled = false;
-        confirmBtn.innerHTML = 'Confirm Slot';
+        confirmBtn.classList.remove('is-loading');
+        confirmBtn.innerHTML = 'Confirm Slot Request';
 
         if (result.success) {
             showBookingStatus(result.message, 'success');
-            // Schedule will auto-update via the realtime subscription — no manual renderSchedule() needed!
             setTimeout(() => {
-                modal.classList.add('hidden');
-                modal.classList.remove('flex');
-                clearConflictUI();
-                // Optionally keep miniMap or destroy? Let's keep for next time but reset inputs
+                closeModal();
                 document.getElementById('bm-lat').value = '';
                 document.getElementById('bm-lng').value = '';
                 document.getElementById('bm-pin-status')?.classList.add('hidden');
                 pinBtn?.classList.remove('hidden');
                 document.getElementById('bm-mini-map')?.classList.add('hidden');
                 if (miniMap) { miniMap.remove(); miniMap = null; }
-            }, 1200);
+            }, 1100);
         } else if (result.status === 'conflict' && result.suggestedTimeRaw) {
-            // ── CONFLICT WITH SUGGESTION — render conflict prompt ────
+            // Race condition: someone else booked it between user's last
+            // glance at the green pill and the Confirm click. Show suggestion.
             pendingBooking = { ...bookingData, time: result.suggestedTimeRaw };
             renderConflictSuggestion(result);
+            // Also reflect in the live pill
+            refreshConflictPill();
         } else if (result.status === 'full') {
-            // ── ALL SLOTS FULL — no suggestion possible ─────────────
-            showBookingStatus(`🚫 ${result.message}`, 'error');
+            showBookingStatus(result.message, 'error');
         } else {
             showBookingStatus(result.message, 'error');
         }
     });
 }
 
-// ─── Conflict Suggestion UI ─────────────────────────────────────────────
 
-/**
- * Renders the conflict detection prompt with Accept/Cancel buttons.
- * @param {{ message: string, suggestedTime: string, conflictingTruck: string }} result
- */
+// ─── Form-data collector (used by Confirm + by the live pill) ──────────
+function collectBookingFormData() {
+    const dateInput  = document.getElementById('bm-date');
+    const timeInput  = document.getElementById('bm-time');
+    const siteSelect = document.getElementById('bm-site');
+    const modeInput  = document.getElementById('bm-location-mode');
+    const material   = document.getElementById('bm-material')?.value || '';
+
+    if (!dateInput || !timeInput || !siteSelect) return null;
+
+    const mode = modeInput ? modeInput.value : 'site';
+    const date = dateInput.value;
+    const time = timeInput.value;
+
+    const data = { date, time, material };
+
+    if (mode === 'site') {
+        const siteOpt = siteSelect.options[siteSelect.selectedIndex];
+        if (!siteOpt) return null;
+        const site = DEMO_SITES.find(s => s.id === siteOpt.value);
+        if (!site) return null;
+        data.targetSite  = site.name;
+        data.road        = siteOpt.dataset.road;
+        data.destLat     = site.lat;
+        data.destLng     = site.lng;
+        data.destName    = site.name;
+    } else {
+        const address = document.getElementById('bm-address').value;
+        const lat = parseFloat(document.getElementById('bm-lat').value);
+        const lng = parseFloat(document.getElementById('bm-lng').value);
+
+        if (!address) { alert('Please enter delivery address'); return null; }
+        if (isNaN(lat)) { alert('Please pin the location on the map'); return null; }
+
+        // Use location-specific road name so nearby custom bookings conflict
+        // but distant ones don't share a slot
+        const roadName = `Custom · ${lat.toFixed(2)},${lng.toFixed(2)}`;
+
+        data.targetSite     = '(Custom Location)';
+        data.customAddress  = address;
+        data.road           = roadName;
+        data.customLat      = lat;
+        data.customLng      = lng;
+        data.destLat        = lat;
+        data.destLng        = lng;
+        data.destName       = address;
+    }
+    return data;
+}
+
+
+// ─── Realtime subscription tied to the modal's date input ──────────────
+function startBookingModalSubscription() {
+    const date = document.getElementById('bm-date')?.value || todayISO();
+    if (modalSubscribedDate === date && unsubscribeBookingModalDate) return;
+
+    if (unsubscribeBookingModalDate) {
+        unsubscribeBookingModalDate();
+        unsubscribeBookingModalDate = null;
+    }
+
+    modalSubscribedDate = date;
+    unsubscribeBookingModalDate = subscribeToBookings(date, () => {
+        // The scheduler module's localBookings cache is now fresh; recompute UI.
+        rebuildTimeSelector();
+        refreshConflictPill();
+    });
+}
+
+function stopBookingModalSubscription() {
+    if (unsubscribeBookingModalDate) {
+        unsubscribeBookingModalDate();
+        unsubscribeBookingModalDate = null;
+        modalSubscribedDate = null;
+    }
+}
+
+
+// ─── Time selector: re-render with live occupancy markers ──────────────
+function rebuildTimeSelector() {
+    const timeInput = document.getElementById('bm-time');
+    if (!timeInput) return;
+
+    const data = collectBookingFormData();
+    const road = data?.road;
+    const date = data?.date || todayISO();
+    const occupied = road ? getOccupiedTimes(road, date) : new Map();
+
+    const previousValue = timeInput.value;
+    const allSlots = generateAllSlots();
+
+    timeInput.innerHTML = allSlots.map(slot => {
+        const taken = occupied.has(slot);
+        const label = `${to12Hour(slot)}${taken ? ' • 🚫 Taken' : ''}`;
+        return `<option value="${slot}"${taken ? ' disabled data-taken="1"' : ''}>${label}</option>`;
+    }).join('');
+
+    // Preserve the user's selection if still valid; else pick the first
+    // free slot — this gives instant useful feedback.
+    if (previousValue && allSlots.includes(previousValue) && !occupied.has(previousValue)) {
+        timeInput.value = previousValue;
+    } else {
+        const firstFree = allSlots.find(s => !occupied.has(s));
+        timeInput.value = firstFree || allSlots[0];
+    }
+}
+
+
+// ─── Live Conflict Pill — renders under the time selector ──────────────
+function refreshConflictPill() {
+    const pill = document.getElementById('bm-conflict-live');
+    if (!pill) return;
+
+    const data = collectBookingFormData();
+    if (!data || !data.road || !data.date || !data.time) {
+        pill.className = 'conflict-live conflict-live--idle';
+        pill.innerHTML = `
+            <span class="conflict-live__icon">⏳</span>
+            <span class="conflict-live__text">Pick a road, date, and time to check capacity…</span>
+        `;
+        return;
+    }
+
+    const { road, date, time } = data;
+
+    // Fast-fail if the slot is in the past
+    const isToday = date === todayISO();
+    let isPast = false;
+    if (date < todayISO()) {
+        isPast = true;
+    } else if (isToday) {
+        const now = new Date();
+        const [slotHour, slotMin] = time.split(':').map(Number);
+        if (slotHour < now.getHours() || (slotHour === now.getHours() && slotMin < now.getMinutes())) {
+            isPast = true;
+        }
+    }
+
+    if (isPast) {
+        pill.className = 'conflict-live conflict-live--conflict';
+        pill.innerHTML = `
+            <span class="conflict-live__icon">⚠️</span>
+            <span class="conflict-live__text">
+                <strong>Slot unavailable</strong> at ${to12Hour(time)}.
+                <span class="conflict-live__sub">This time slot has already passed today.</span>
+            </span>
+        `;
+        return;
+    }
+
+    const { conflict, booking } = checkConflict(road, date, time);
+
+    if (!conflict) {
+        const occupied = getOccupiedTimes(road, date);
+        const totalSlots = generateAllSlots().length;
+        const freeCount  = totalSlots - occupied.size;
+        pill.className = 'conflict-live conflict-live--ok';
+        pill.innerHTML = `
+            <span class="conflict-live__icon">✓</span>
+            <span class="conflict-live__text">
+                <strong>Slot available</strong> on ${escapeHTML(road)} at ${to12Hour(time)}.
+                <span class="conflict-live__sub">${freeCount} of ${totalSlots} 30-min windows free today on this road.</span>
+            </span>
+            <span class="conflict-live__live"><span class="conflict-live__dot"></span>Live</span>
+        `;
+        return;
+    }
+
+    // Conflict — find next available + offer one-click swap.
+    const next = findNextAvailableSlot(road, date, time);
+    const nextHtml = next.found
+        ? `<button type="button" class="conflict-live__swap" id="bm-swap-time" data-time="${next.time}">
+               Use ${escapeHTML(next.display)} →
+           </button>`
+        : `<span class="conflict-live__sub">No free slot on this road today.</span>`;
+
+    pill.className = 'conflict-live conflict-live--conflict';
+    pill.innerHTML = `
+        <span class="conflict-live__icon">⚠</span>
+        <span class="conflict-live__text">
+            <strong>Conflict at ${to12Hour(time)}</strong> — ${escapeHTML(booking.driver || booking.truckId || 'Another truck')} is on ${escapeHTML(road)}.
+            <span class="conflict-live__sub">Narrow road allows only 1 truck per 30-min window.</span>
+        </span>
+        ${nextHtml}
+    `;
+
+    // Wire the one-click swap-to-next-free-slot button.
+    const swapBtn = document.getElementById('bm-swap-time');
+    if (swapBtn) {
+        swapBtn.addEventListener('click', () => {
+            const t = swapBtn.dataset.time;
+            const timeInput = document.getElementById('bm-time');
+            if (t && timeInput) {
+                timeInput.value = t;
+                refreshConflictPill();
+            }
+        });
+    }
+}
+
+
+// ─── Conflict-suggestion fallback (race-condition path on Confirm) ─────
 function renderConflictSuggestion(result) {
     const statusEl = document.getElementById('bm-status');
     if (!statusEl) return;
 
     statusEl.classList.remove('hidden');
-    statusEl.className = 'mt-4 rounded-xl overflow-hidden border border-amber-500/20 animate-[fadeInUp_0.3s_ease-out]';
+    statusEl.className = 'conflict-suggestion';
     statusEl.innerHTML = `
-        <!-- Conflict Header -->
-        <div class="bg-red-500/10 px-4 py-3 flex items-center gap-3 border-b border-red-500/10">
-            <span class="flex-shrink-0 w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center text-sm">🚫</span>
-            <div class="flex-1 min-w-0">
-                <p class="text-red-400 font-semibold text-sm">Conflict Detected</p>
-                <p class="text-slate-400 text-xs mt-0.5 truncate">${result.message}</p>
+        <div class="conflict-suggestion__head">
+            <span class="conflict-suggestion__head-icon">🚫</span>
+            <div class="conflict-suggestion__head-text">
+                <p class="conflict-suggestion__title">Conflict detected at booking time</p>
+                <p class="conflict-suggestion__sub">${escapeHTML(result.message)}</p>
             </div>
         </div>
-
-        <!-- Suggestion Card -->
-        <div class="bg-amber-500/5 px-4 py-4">
-            <div class="flex items-center gap-3 mb-4">
-                <span class="flex-shrink-0 w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center">
-                    <span class="text-emerald-400 text-lg">🕐</span>
-                </span>
-                <div>
-                    <p class="text-slate-300 text-sm font-medium">Next available slot:</p>
-                    <p class="text-emerald-400 text-xl font-bold tracking-tight">${result.suggestedTime}</p>
-                </div>
+        <div class="conflict-suggestion__body">
+            <div class="conflict-suggestion__next">
+                <span class="conflict-suggestion__next-label">Next available</span>
+                <span class="conflict-suggestion__next-time">${escapeHTML(result.suggestedTime)}</span>
             </div>
-
-            <p class="text-slate-500 text-xs mb-4 leading-relaxed">
-                The Conflict Detection Engine found a free window on the same road. Book this slot instead?
-            </p>
-
-            <!-- Action Buttons -->
-            <div class="flex gap-3">
-                <button id="bm-accept-suggestion"
-                    class="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-[0.97] shadow-lg hover:shadow-emerald-500/20">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                    Accept ${result.suggestedTime}
+            <div class="conflict-suggestion__actions">
+                <button type="button" id="bm-accept-suggestion" class="btn-primary conflict-suggestion__accept">
+                    Accept ${escapeHTML(result.suggestedTime)}
                 </button>
-                <button id="bm-reject-suggestion"
-                    class="px-5 py-2.5 text-slate-400 hover:text-white text-sm rounded-xl hover:bg-white/5 transition-all border border-white/5">
+                <button type="button" id="bm-reject-suggestion" class="conflict-suggestion__reject">
                     Cancel
                 </button>
             </div>
         </div>
     `;
 
-    // ── Bind suggestion buttons ─────────────────────────────────────
-    const acceptBtn = document.getElementById('bm-accept-suggestion');
-    const rejectBtn = document.getElementById('bm-reject-suggestion');
+    document.getElementById('bm-accept-suggestion')?.addEventListener('click', async () => {
+        if (!pendingBooking) return;
+        const acceptBtn = document.getElementById('bm-accept-suggestion');
+        acceptBtn.disabled = true;
+        acceptBtn.classList.add('is-loading');
+        acceptBtn.innerHTML = '<span class="btn-spinner"></span><span>Booking…</span>';
 
-    if (acceptBtn) {
-        acceptBtn.addEventListener('click', async () => {
-            if (!pendingBooking) return;
-
-            acceptBtn.disabled = true;
-            acceptBtn.innerHTML = '<span class="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span> Booking...';
-
-            const result = await bookDeliverySlot(pendingBooking);
-
-            if (result.success) {
-                statusEl.className = 'mt-4 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20';
-                statusEl.innerHTML = `
-                    <div class="flex items-center gap-3">
-                        <span class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center text-sm">✅</span>
-                        <div>
-                            <p class="text-emerald-400 font-semibold text-sm">Slot Booked Successfully!</p>
-                            <p class="text-slate-400 text-xs mt-0.5">${result.message}</p>
-                        </div>
-                    </div>
-                `;
-                // Schedule auto-updates via realtime subscription
-                pendingBooking = null;
-
-                const modal = document.getElementById('booking-modal');
-                setTimeout(() => {
-                    if (modal) {
-                        modal.classList.add('hidden');
-                        modal.classList.remove('flex');
-                    }
-                    clearConflictUI();
-                }, 1500);
-            } else {
-                // Edge case: suggested slot also got taken (race condition)
-                showBookingStatus(`Suggested slot also taken: ${result.message}`, 'error');
-                pendingBooking = null;
-            }
-        });
-    }
-
-    if (rejectBtn) {
-        rejectBtn.addEventListener('click', () => {
-            clearConflictUI();
+        const r = await bookDeliverySlot(pendingBooking);
+        if (r.success) {
+            statusEl.className = 'status-msg status-success';
+            statusEl.textContent = r.message;
             pendingBooking = null;
-        });
-    }
+            setTimeout(() => {
+                document.getElementById('booking-modal')?.classList.add('hidden');
+                clearConflictUI();
+            }, 1300);
+        } else {
+            showBookingStatus(`Suggested slot also taken: ${r.message}`, 'error');
+            pendingBooking = null;
+            refreshConflictPill();
+        }
+    });
+    document.getElementById('bm-reject-suggestion')?.addEventListener('click', () => {
+        clearConflictUI();
+        pendingBooking = null;
+    });
 }
 
-/**
- * Clear the conflict suggestion UI and reset status area.
- */
 function clearConflictUI() {
     const statusEl = document.getElementById('bm-status');
     if (statusEl) {
         statusEl.classList.add('hidden');
-        statusEl.className = 'hidden mt-4 p-3 rounded-lg text-sm';
+        statusEl.className = 'hidden';
         statusEl.innerHTML = '';
     }
     pendingBooking = null;
@@ -736,11 +944,15 @@ function showBookingStatus(message, type) {
     const el = document.getElementById('bm-status');
     if (!el) return;
     el.classList.remove('hidden');
-    el.className = `mt-4 p-3 rounded-lg text-sm font-medium ${
-        type === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
-        'bg-red-500/10 text-red-400 border border-red-500/20'
-    }`;
+    el.className = `status-msg status-${type === 'success' ? 'success' : 'error'}`;
     el.textContent = message;
+}
+
+// ─── Tiny HTML escape helper used by the realtime panels ───────────────
+function escapeHTML(s) {
+    return String(s ?? '').replace(/[&<>"']/g, ch => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[ch]));
 }
 
 /**

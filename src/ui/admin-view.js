@@ -54,6 +54,7 @@ export async function initAdminView() {
     bindRefreshButtons();
     await loadPendingDrivers();
     await initHeatmap();
+    startRealtimeStats();
 }
 
 export function destroyAdminView() {
@@ -61,6 +62,7 @@ export function destroyAdminView() {
     unsubscribeListeners.forEach(fn => fn());
     unsubscribeListeners = [];
     truckMarkers = {};
+    truckPaths = {};
     initialized = false;
 }
 
@@ -145,6 +147,59 @@ function renderStats() {
     `).join('');
 }
 
+/**
+ * Subscribe to Firestore bookings for today to get live stats.
+ * Updates the admin dashboard stats cards with real data.
+ */
+function startRealtimeStats() {
+    const today = todayISO();
+    try {
+        const q = query(
+            collection(db, 'logistics_slots'),
+            where('date', '==', today)
+        );
+        const unsub = onSnapshot(q, async (snapshot) => {
+            const bookings = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+            const completedCount = bookings.filter(b => b.status === 'COMPLETED').length;
+
+            // Calculate compliance rate from actual data
+            let complianceRate = '—';
+            if (bookings.length > 0) {
+                const rate = Math.round((completedCount / bookings.length) * 100);
+                complianceRate = `${rate}%`;
+            }
+
+            const violationCount = DEMO_AUDIT_LOG.filter(l => l.severity === 'critical').length;
+
+            const el = document.getElementById('admin-stats');
+            if (!el) return;
+
+            const stats = [
+                { label: 'Active Sites', value: DEMO_SITES.length, icon: '🏗️' },
+                { label: "Today's Deliveries", value: bookings.length, icon: '🚛' },
+                { label: 'Compliance Rate', value: complianceRate, icon: '✅' },
+                { label: 'Violations Today', value: violationCount, icon: '🚨' },
+            ];
+
+            el.innerHTML = stats.map(s => `
+                <div class="dash-card p-6 flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <span class="text-xl">${s.icon}</span>
+                        <span class="ui-label text-[#64748B]">/ Global</span>
+                    </div>
+                    <div>
+                        <p class="text-4xl font-extrabold text-[#1C1C1C]">${s.value}</p>
+                        <p class="ui-label mt-2 text-[#7A8C3E]">${s.label}</p>
+                    </div>
+                </div>
+            `).join('');
+        });
+        unsubscribeListeners.push(unsub);
+    } catch (e) {
+        console.warn('Could not start realtime stats:', e.message);
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  TAB 1: DASHBOARD (Pending Approvals + Heatmap + Audit Log)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -194,29 +249,18 @@ function bindPendingActions(container, badge, section) {
     container.querySelectorAll('.approve-driver-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             btn.disabled = true; btn.textContent = '...';
-            const res = await approveDriver(btn.dataset.uid);
-            if (res.success) fadeAndRemove(btn.dataset.uid, 'pending', badge, section);
+            await approveDriver(btn.dataset.uid);
+            // The realtime listener handles UI removal automatically
         });
     });
     container.querySelectorAll('.reject-driver-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             if (!confirm(`Reject driver "${btn.dataset.name}"?`)) return;
             btn.disabled = true; btn.textContent = '...';
-            const res = await rejectDriver(btn.dataset.uid);
-            if (res.success) fadeAndRemove(btn.dataset.uid, 'pending', badge, section);
+            await rejectDriver(btn.dataset.uid);
+            // The realtime listener handles UI removal automatically
         });
     });
-}
-
-function fadeAndRemove(uid, prefix, badge, section) {
-    const row = document.getElementById(`${prefix}-${uid}`);
-    if (row) {
-        row.style.opacity = '0'; row.style.transform = 'translateX(20px)';
-        setTimeout(() => row.remove(), 300);
-        const c = parseInt(badge?.textContent || '0');
-        if (badge) badge.textContent = Math.max(0, c - 1);
-        if (c - 1 <= 0 && section) section.classList.add('hidden');
-    }
 }
 
 // Audit Log
@@ -403,6 +447,8 @@ async function loadAllBookings() {
         const sc = statusConfig[b.status] || statusConfig['SCHEDULED'];
         const dateStr = b.date || '—';
         const timeStr = b.time ? to12Hour(b.time) : '—';
+        const isCustom = b.targetSite === '(Custom Location)' || !!b.customAddress;
+        const destDisplay = b.destName || b.customAddress || b.targetSite || 'Unknown Site';
         return `
         <div class="responsive-list-card flex items-center gap-6 p-4 border border-[#1C1C1C]/10 bg-white transition-all duration-200">
             <div class="w-16 text-center border-r border-[#1C1C1C]/10 pr-6 flex-shrink-0">
@@ -410,14 +456,13 @@ async function loadAllBookings() {
                 <p class="text-[9px] font-bold text-[#64748B] uppercase">${timeStr.split(' ')[1] || ''}</p>
             </div>
             <div class="flex-1 min-w-0">
-                <p class="ui-label text-[#7A8C3E] mb-1">/ Booking Confirmed</p>
+                <p class="ui-label text-[#7A8C3E] mb-1">/ ${isCustom ? '📌 Custom Delivery' : 'Booking Confirmed'}</p>
                 <p class="font-bold text-[#1C1C1C] text-sm uppercase tracking-tight">${b.truckId || 'UNASSIGNED'}</p>
-                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${b.road || 'Unknown Site'} · ${dateStr}</p>
-                ${b.material ? `
-                    <div class="mt-2 flex items-center gap-2">
-                        <span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>
-                    </div>
-                ` : ''}
+                <p class="text-[10px] text-[#64748B] font-medium mt-1 uppercase tracking-wider">${b.driver || 'No Driver'} · ${destDisplay} · ${dateStr}</p>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    ${b.material ? `<span class="px-2 py-0.5 bg-[#F8FAFC] text-[#1C1C1C] text-[9px] font-extrabold uppercase tracking-widest border border-[#1C1C1C]/10">${b.material}</span>` : ''}
+                    ${isCustom ? `<span class="px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-widest border" style="background:rgba(224,85,53,0.06);color:#E05535;border-color:rgba(224,85,53,0.15);">📌 Custom Point</span>` : ''}
+                </div>
             </div>
             <div class="list-actions-wrapper flex items-center gap-3 flex-shrink-0 h-full">
                 <div class="flex items-center gap-2 mr-2">
@@ -618,14 +663,6 @@ function reconcileTruckMarkers(trucks) {
 
     const currentIds = new Set(trucks.map(t => t.id));
 
-    // Remove markers for trucks that are no longer active
-    for (const id of Object.keys(truckMarkers)) {
-        if (!currentIds.has(id)) {
-            adminMap.removeLayer(truckMarkers[id]);
-            delete truckMarkers[id];
-        }
-    }
-
     // Add or update markers
     trucks.forEach(truck => {
         if (!truck.lat || !truck.lng) return;
@@ -673,18 +710,75 @@ function reconcileTruckMarkers(trucks) {
                 [truck.destLat, truck.destLng],
                 { color: '#8b5cf6', weight: 4, opacity: 0.6 }
             );
+
+            // Dynamic destination marker + geofence circle (auto-removed when truck goes offline)
+            const destKey = `dest_${truck.destLat.toFixed(4)}_${truck.destLng.toFixed(4)}`;
+            if (!truckMarkers[destKey]) {
+                // Destination marker
+                const destIcon = L.divIcon({
+                    className: 'dest-pin-dynamic',
+                    html: `<div style="width:22px;height:22px;background:#E05535;border:3px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(224,85,53,0.4);display:flex;align-items:center;justify-content:center;">
+                             <div style="width:5px;height:5px;background:#fff;border-radius:50%;"></div>
+                           </div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11]
+                });
+                truckMarkers[destKey] = L.marker([truck.destLat, truck.destLng], { icon: destIcon })
+                    .addTo(adminMap)
+                    .bindPopup(`<div style="font-family:Inter,sans-serif;padding:4px;"><strong style="font-size:12px;">📍 Delivery Destination</strong><br><span style="color:#E05535;font-size:11px;font-weight:600;">Driver: ${truck.driver || 'Unknown'}</span></div>`);
+            }
+
+            // Temporary geofence circle around destination
+            const circleKey = `circle_${truck.destLat.toFixed(4)}_${truck.destLng.toFixed(4)}`;
+            if (!truckPaths[circleKey]) {
+                truckPaths[circleKey] = L.circle([truck.destLat, truck.destLng], {
+                    radius: 500,
+                    color: '#7A8C3E',
+                    fillColor: '#7A8C3E',
+                    fillOpacity: 0.08,
+                    weight: 1,
+                    dashArray: '6, 4'
+                }).addTo(adminMap);
+            }
         }
     });
 
-    // Cleanup markers and paths
+    // Remove markers, paths, dest markers, and circles for trucks that went offline
     for (const id of Object.keys(truckMarkers)) {
-        if (!currentIds.has(id)) {
+        if (!currentIds.has(id) && !id.startsWith('dest_')) {
             adminMap.removeLayer(truckMarkers[id]);
             delete truckMarkers[id];
-            
+
             if (truckPaths[id]) {
-                adminMap.removeLayer(truckPaths[id]);
+                try { truckPaths[id].remove(); } catch(e) {}
+                try { adminMap.removeLayer(truckPaths[id]); } catch(e) {}
                 delete truckPaths[id];
+            }
+        }
+    }
+
+    // Clean up destination markers and circles that no longer have active trucks
+    const activeDestKeys = new Set();
+    trucks.forEach(t => {
+        if (t.destLat && t.destLng) {
+            activeDestKeys.add(`${t.destLat.toFixed(4)}_${t.destLng.toFixed(4)}`);
+        }
+    });
+    for (const key of Object.keys(truckMarkers)) {
+        if (key.startsWith('dest_')) {
+            const coordKey = key.replace('dest_', '');
+            if (!activeDestKeys.has(coordKey)) {
+                try { adminMap.removeLayer(truckMarkers[key]); } catch(e) {}
+                delete truckMarkers[key];
+            }
+        }
+    }
+    for (const key of Object.keys(truckPaths)) {
+        if (key.startsWith('circle_')) {
+            const coordKey = key.replace('circle_', '');
+            if (!activeDestKeys.has(coordKey)) {
+                try { adminMap.removeLayer(truckPaths[key]); } catch(e) {}
+                delete truckPaths[key];
             }
         }
     }

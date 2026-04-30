@@ -134,14 +134,16 @@ export function createSiteIcon() {
 
 export function createTruckIcon() {
     if (!window.L) return null;
+    // Using Microsoft Fluent 3D Delivery Truck Emoji
+    const truckImg = 'https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Delivery%20truck/3D/delivery_truck_3d.png';
     return L.divIcon({
         className: 'custom-truck-marker',
-        html: `<div style="width:32px;height:32px;background:#1C1C1C;border:2px solid #7A8C3E;border-radius:6px;display:flex;items-center;justify-content:center;box-shadow:0 4px 8px rgba(0,0,0,0.2)">
-                 <span style="font-size:18px">🚛</span>
+        html: `<div style="width:48px;height:48px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0px 8px 12px rgba(0,0,0,0.4));transform:scale(1.2);transition:transform 0.3s ease;">
+                 <img src="${truckImg}" style="width:100%;height:100%;object-fit:contain;" alt="3D Truck">
                </div>`,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-        popupAnchor: [0, -18]
+        iconSize: [48, 48],
+        iconAnchor: [24, 24],
+        popupAnchor: [0, -20]
     });
 }
 

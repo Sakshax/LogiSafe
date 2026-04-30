@@ -1,5 +1,5 @@
 /**
- * auth.js — Authentication & Role-Based Access Control Module v3
+ * auth.js — Authentication & Role-Based Access Control Module v4
  *
  * Registration & Login System:
  *  - ADMIN: Single hardcoded account. Login only, no registration.
@@ -7,7 +7,10 @@
  *  - DRIVER: Self-register → status='pending'. Admin must approve before login works.
  *
  * User records stored in Firestore `users` collection:
- *   { uid, email, name, role, status: 'active'|'pending'|'rejected', registeredAt }
+ *   { uid, email, name, role, status: 'active'|'pending'|'rejected'|'suspended', registeredAt }
+ *
+ * v4: Fixed getUserProfile dynamic import, added email normalization,
+ *     password/mobile validation, suspended user blocking.
  */
 
 import {
@@ -16,8 +19,16 @@ import {
     createUserWithEmailAndPassword,
     signOut as fbSignOut,
     onAuthStateChanged,
-    collection, doc, setDoc, getDocs, query, where, orderBy, deleteDoc, Timestamp, onSnapshot
+    collection, doc, setDoc, getDoc, getDocs, query, where, orderBy, deleteDoc, Timestamp, onSnapshot
 } from '../config/firebase-config.js';
+
+// ─── Validation Helpers ─────────────────────────────────────────────────
+function normalizeEmail(email) { return (email || '').toLowerCase().trim(); }
+
+function validateMobile(mobile) {
+    const digits = (mobile || '').replace(/[\s\-+]/g, '').replace(/^91/, '');
+    return /^\d{10}$/.test(digits);
+}
 
 // ─── Role Constants ─────────────────────────────────────────────────────
 export const ROLES = Object.freeze({
@@ -47,6 +58,13 @@ export function onAuthChange(cb) {
         if (fbUser) {
             const profile = await getUserProfile(fbUser.uid);
             if (profile) {
+                // Block suspended, pending, or rejected users from staying logged in
+                if (profile.status === 'suspended' ||
+                    (profile.role === ROLES.DRIVER && (profile.status === 'pending' || profile.status === 'rejected'))) {
+                    await fbSignOut(auth);
+                    if (authChangeCallback) authChangeCallback(null, null);
+                    return;
+                }
                 currentUser = {
                     uid: fbUser.uid,
                     email: fbUser.email,
@@ -56,7 +74,7 @@ export function onAuthChange(cb) {
                 };
                 currentRole = profile.role;
                 if (authChangeCallback) authChangeCallback(currentUser, currentRole);
-            } else if (fbUser.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+            } else if (normalizeEmail(fbUser.email) === normalizeEmail(ADMIN_EMAIL)) {
                 currentUser = { uid: fbUser.uid, email: fbUser.email, displayName: 'Admin' };
                 currentRole = ROLES.ADMIN;
                 if (authChangeCallback) authChangeCallback(currentUser, currentRole);
@@ -80,8 +98,9 @@ export function onAuthChange(cb) {
  * @returns {{ success: boolean, user?, role?, error? }}
  */
 export async function loginWithEmail(email, password) {
+    const normEmail = normalizeEmail(email);
     try {
-        const cred = await signInWithEmailAndPassword(auth, email, password);
+        const cred = await signInWithEmailAndPassword(auth, normEmail, password);
         const uid = cred.user.uid;
 
         // Look up user profile in Firestore
@@ -90,7 +109,7 @@ export async function loginWithEmail(email, password) {
         if (!userProfile) {
             // Edge case: auth account exists but no Firestore profile
             // Check if it's the admin email
-            if (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+            if (normEmail === normalizeEmail(ADMIN_EMAIL)) {
                 currentUser = { uid, email, displayName: 'Admin' };
                 currentRole = ROLES.ADMIN;
                 if (authChangeCallback) authChangeCallback(currentUser, currentRole);
@@ -109,6 +128,12 @@ export async function loginWithEmail(email, password) {
         if (userProfile.role === ROLES.DRIVER && userProfile.status === 'rejected') {
             await fbSignOut(auth);
             return { success: false, error: 'Your driver registration was rejected. Contact the admin for details.' };
+        }
+
+        // Block suspended users (any role)
+        if (userProfile.status === 'suspended') {
+            await fbSignOut(auth);
+            return { success: false, error: 'Your account has been suspended. Contact the admin for details.' };
         }
 
         currentUser = {
@@ -149,19 +174,31 @@ export async function loginWithEmail(email, password) {
  * @returns {{ success: boolean, message?: string, error?: string }}
  */
 export async function registerUser({ name, email, password, role, truckLicense, mobile }) {
+    const normEmail = normalizeEmail(email);
+
     // Block admin registration
     if (role === ROLES.ADMIN) {
         return { success: false, error: 'Admin accounts cannot be registered.' };
     }
 
     // Block registration with admin email
-    if (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+    if (normEmail === normalizeEmail(ADMIN_EMAIL)) {
         return { success: false, error: 'This email is reserved for admin use.' };
+    }
+
+    // Validate driver-specific fields
+    if (role === ROLES.DRIVER) {
+        if (!truckLicense || truckLicense.trim().length < 4) {
+            return { success: false, error: 'Please enter a valid truck license number (at least 4 characters).' };
+        }
+        if (mobile && !validateMobile(mobile)) {
+            return { success: false, error: 'Mobile number must be exactly 10 digits.' };
+        }
     }
 
     try {
         // Create Firebase Auth account
-        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        const cred = await createUserWithEmailAndPassword(auth, normEmail, password);
         const uid = cred.user.uid;
 
         // Determine status based on role
@@ -170,7 +207,7 @@ export async function registerUser({ name, email, password, role, truckLicense, 
         // Create Firestore user profile
         const userProfile = {
             uid,
-            email,
+            email: normEmail,
             name,
             role,
             status,
@@ -464,11 +501,11 @@ export async function logout() {
 
 /**
  * Look up a user's Firestore profile.
+ * Uses the already-imported getDoc — no dynamic CDN import needed.
  * @param {string} uid
  */
 async function getUserProfile(uid) {
     try {
-        const { getDoc } = await import('https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js');
         const snap = await getDoc(doc(db, 'users', uid));
         return snap.exists() ? snap.data() : null;
     } catch (err) {

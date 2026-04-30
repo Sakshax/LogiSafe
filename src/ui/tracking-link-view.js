@@ -11,10 +11,12 @@
  *  7. Photo upload → delivery complete → link expired
  */
 
-import { startTracking, stopTracking, isTrackingActive, setDestination, getGeofenceRadius } from '../modules/tracking.js';
+import { startTracking, stopTracking, isTrackingActive, setDestination, getGeofenceRadius, setDriverMetadata } from '../modules/tracking.js';
 import { uploadCompliancePhoto, simulateUpload } from '../modules/compliance.js';
+import { updateBookingStatus } from '../modules/scheduler.js';
 import { DEMO_SITES } from '../config/maps-config.js';
-import { initMaps, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION, createTruckIcon, createSiteIcon } from '../config/maps-config.js';
+import { initMaps, STANDARD_TILE_URL, STANDARD_TILE_ATTRIBUTION, createTruckIcon, createSiteIcon, addRoadRoute } from '../config/maps-config.js';
+import { calculateDistance } from '../utils/haversine.js';
 
 let initialized = false;
 let trackingActive = false;
@@ -29,6 +31,13 @@ let driverMarker = null;
 let destMarker = null;
 let routeLine = null;
 
+// Route update throttle — avoid spamming OSRM on every GPS tick
+let lastRouteUpdateTime = 0;
+let lastRouteLat = null;
+let lastRouteLng = null;
+const ROUTE_UPDATE_INTERVAL_MS = 30000; // 30 seconds
+const ROUTE_UPDATE_DISTANCE_KM = 0.2;  // 200 meters
+
 // DOM references
 let els = {};
 
@@ -40,8 +49,10 @@ const currentTrip = {
     bookingId: 'booking-demo-001'
 };
 
-// Speed tracking
+// Speed tracking — track actual movement for real speed calculation
 let lastPositionTime = null;
+let lastPositionLat = null;
+let lastPositionLng = null;
 let lastSpeedKmh = 0;
 
 export async function initTrackingLinkView(token) {
@@ -72,6 +83,9 @@ export function destroyTrackingLinkView() {
     driverMarker = null;
     destMarker = null;
     routeLine = null;
+    lastRouteUpdateTime = 0;
+    lastRouteLat = null;
+    lastRouteLng = null;
     initialized = false;
     complianceUnlocked = false;
     tripCompleted = false;
@@ -79,6 +93,8 @@ export function destroyTrackingLinkView() {
     currentTrip.driverId = null;
     currentTrip.driverName = null;
     lastPositionTime = null;
+    lastPositionLat = null;
+    lastPositionLng = null;
 }
 
 // ─── Inline Login Handler ───────────────────────────────────────────────
@@ -130,9 +146,11 @@ function bindTrackingLogin() {
                 return;
             }
 
-            // ✅ Success — set driver info
             currentTrip.driverId = uid;
             currentTrip.driverName = profile.name || email;
+
+            // Set driver metadata so tracking module can enrich Firestore docs
+            setDriverMetadata(profile.name || email, profile.truckLicense || '');
 
             // Load destination, show tracking UI, auto-start GPS
             await loadDestinationAndAutoStart();
@@ -342,14 +360,31 @@ function updateDriverMapPosition(lat, lng) {
         driverMarker = L.marker([lat, lng], { icon: truckIcon }).addTo(driverMap);
     }
 
-    // Update route line from driver to destination
-    if (routeLine) {
-        driverMap.removeLayer(routeLine);
+    // Update road-following route from driver to destination (throttled)
+    const now = Date.now();
+    const movedSinceLastRoute = (lastRouteLat !== null && lastRouteLng !== null)
+        ? calculateDistance(lastRouteLat, lastRouteLng, lat, lng)
+        : 999;
+    const shouldUpdateRoute = !routeLine
+        || (now - lastRouteUpdateTime > ROUTE_UPDATE_INTERVAL_MS)
+        || (movedSinceLastRoute >= ROUTE_UPDATE_DISTANCE_KM);
+
+    if (shouldUpdateRoute) {
+        if (routeLine) {
+            try { routeLine.remove(); } catch(e) {}
+            try { driverMap.removeLayer(routeLine); } catch(e) {}
+            routeLine = null;
+        }
+        routeLine = addRoadRoute(
+            driverMap,
+            [lat, lng],
+            [currentTrip.site.lat, currentTrip.site.lng],
+            { color: '#7A8C3E', weight: 4, opacity: 0.7 }
+        );
+        lastRouteUpdateTime = now;
+        lastRouteLat = lat;
+        lastRouteLng = lng;
     }
-    routeLine = L.polyline(
-        [[lat, lng], [currentTrip.site.lat, currentTrip.site.lng]],
-        { color: '#7A8C3E', weight: 3, opacity: 0.6, dashArray: '8, 6' }
-    ).addTo(driverMap);
 
     // Pan map to keep driver visible
     driverMap.panTo([lat, lng], { animate: true, duration: 0.5 });
@@ -372,6 +407,11 @@ function autoStartGPS() {
             setStatus('GPS ERROR', '#E05535');
         }
     );
+
+    // Update booking status to EN_ROUTE
+    if (currentTrip.bookingId) {
+        updateBookingStatus(currentTrip.bookingId, 'EN_ROUTE').catch(() => {});
+    }
 }
 
 // ─── Position Update Callback ───────────────────────────────────────────
@@ -385,16 +425,20 @@ function onPositionUpdate(distanceKm, lat, lng) {
     const etaMinutes = Math.max(1, Math.round((distanceKm / 25) * 60));
     if (els.etaText) els.etaText.textContent = `${etaMinutes}`;
 
-    // Speed calculation
+    // Speed calculation — compute real speed from actual movement
     const now = Date.now();
-    if (lastPositionTime) {
+    if (lastPositionTime && lastPositionLat !== null && lastPositionLng !== null) {
         const timeDiffHours = (now - lastPositionTime) / (1000 * 60 * 60);
-        if (timeDiffHours > 0) {
-            // Use distance-to-dest change as proxy (rough)
-            lastSpeedKmh = Math.min(80, Math.max(0, Math.round(distanceKm / Math.max(0.01, etaMinutes / 60))));
+        if (timeDiffHours > 0.0001) { // At least ~0.36 seconds
+            const movedKm = calculateDistance(lastPositionLat, lastPositionLng, lat, lng);
+            const rawSpeed = movedKm / timeDiffHours;
+            // Clamp to reasonable range (0-120 km/h) and smooth
+            lastSpeedKmh = Math.min(120, Math.max(0, Math.round(rawSpeed)));
         }
     }
     lastPositionTime = now;
+    lastPositionLat = lat;
+    lastPositionLng = lng;
     if (els.speedText) els.speedText.textContent = `${lastSpeedKmh}`;
 
     // GPS status → active
@@ -431,6 +475,11 @@ function onGeofenceEnter(distanceKm) {
 
     setStatus('SITE REACHED', '#F4A623');
 
+    // Update booking status to ARRIVED
+    if (currentTrip.bookingId) {
+        updateBookingStatus(currentTrip.bookingId, 'ARRIVED').catch(() => {});
+    }
+
     const cs = els.complianceSection;
     if (cs) {
         cs.style.opacity = '1';
@@ -441,7 +490,7 @@ function onGeofenceEnter(distanceKm) {
     if (els.complianceInstructions) {
         els.complianceInstructions.innerHTML = `
             <span style="color:#7A8C3E;font-weight:600;">📸 Photo Required!</span>
-            <span style="color:#64748B;margin-left:4px;">Upload a departing photo to complete delivery.</span>`;
+            <span style="color:#64748B;margin-left:4px;">Upload an arrival delivery proof to complete delivery.</span>`;
     }
 
     if (els.uploadBtn) els.uploadBtn.disabled = false;
@@ -483,9 +532,14 @@ async function handlePhotoUpload(e) {
     try {
         const result = await uploadCompliancePhoto(file, currentTrip.bookingId, (progress) => {
             if (els.progressBar) els.progressBar.style.width = `${progress}%`;
+        }, {
+            driverName: currentTrip.driverName,
+            driverId: currentTrip.driverId,
+            siteName: currentTrip.site?.name || '',
         });
         completeDelivery(result.url);
     } catch (err) {
+        console.warn('Photo upload failed, using simulation:', err.message);
         const result = await simulateUpload((progress) => {
             if (els.progressBar) els.progressBar.style.width = `${progress}%`;
         });
